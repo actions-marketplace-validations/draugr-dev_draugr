@@ -12,7 +12,7 @@ import (
 )
 
 // A shorter line must not leave the tail of a longer one behind, or the display reads as two
-// states at once — "scanning 9/11" followed by the debris of six scanner names.
+// states at once, "scanning 9/11" followed by the debris of six scanner names.
 func TestProgressClearsWhatItNoLongerCovers(t *testing.T) {
 	var buf bytes.Buffer
 	p := &progressLine{w: &buf}
@@ -60,7 +60,7 @@ func TestALogLineErasesTheProgressLineFirst(t *testing.T) {
 	}
 }
 
-// With no line drawn — piped output, --no-tips — the writer must not touch what it passes through.
+// With no line drawn, piped output, --no-tips. The writer must not touch what it passes through.
 func TestLogWriterIsTransparentWithoutAProgressLine(t *testing.T) {
 	active.Store(nil)
 	var buf bytes.Buffer
@@ -87,8 +87,8 @@ func TestNoProgressWhenItWouldBeNoise(t *testing.T) {
 // TestProgressDoneIsIdempotent covers the shape the fix depends on.
 //
 // The line is erased when the run finishes, so the report starts on a clean row, and again on the
-// way out for a path that returned early. Erasing twice must be harmless — and the second must
-// not emit a second row of blanks, which on a terminal is an empty line nobody asked for.
+// way out for a path that returned early. Erasing twice must be harmless. And the second must not
+// emit a second row of blanks, which on a terminal is an empty line nobody asked for.
 func TestProgressDoneIsIdempotent(t *testing.T) {
 	var buf bytes.Buffer
 	p := newProgressLineFor(&buf)
@@ -178,9 +178,9 @@ func TestProgressFrameIsEmptyBeforeAnythingIsPlanned(t *testing.T) {
 // TestProgressShowsHowLongAStepHasBeenRunning answers the question a stalled-looking scan
 // provokes: is this working?
 //
-// A step with one slow job produces no progress events at all while it runs — a scanner that
-// creates a Job in a cluster and waits for it can take minutes — so a stuck run and a slow one
-// look identical unless something keeps counting.
+// A step with one slow job produces no progress events at all while it runs, a scanner that
+// creates a Job in a cluster and waits for it can take minutes. So a stuck run and a slow one look
+// identical unless something keeps counting.
 func TestProgressShowsHowLongAStepHasBeenRunning(t *testing.T) {
 	ev := engine.ProgressEvent{
 		Total: 2, Complete: 1,
@@ -233,7 +233,7 @@ func TestProgressHeadlineStaysQuietForAFastRun(t *testing.T) {
 	}
 }
 
-// elapsedFigure matches the durations the display renders — "45s", "1m35s" — and nothing else.
+// elapsedFigure matches the durations the display renders, "45s", "1m35s", and nothing else.
 var elapsedFigure = regexp.MustCompile(`\b\d+(m\d{2})?s\b`)
 
 // TestProgressDoesNotTimeAJobThatJustStarted: a job that finishes quickly would flash a "0s" on
@@ -246,5 +246,165 @@ func TestProgressDoesNotTimeAJobThatJustStarted(t *testing.T) {
 	}, tui.Painter{})
 	if elapsedFigure.MatchString(line) {
 		t.Errorf("a step that just started should not carry a clock: %q", line)
+	}
+}
+
+// A frame is erased by moving the cursor up once per line it drew. That arithmetic is only true
+// while every line occupies one row, and a terminal wraps a line it cannot fit onto two. The
+// repaint then stops one row short, and `\033[2K` clears whatever is there, which is the reader's
+// own output rather than anything this program wrote. Every repaint after it drifts one row
+// further up the screen.
+func TestAFrameNeverOccupiesMoreRowsThanItErases(t *testing.T) {
+	const width = 40
+	var buf bytes.Buffer
+	p := &progressLine{w: &buf, columns: func() int { return width }}
+	t.Cleanup(func() { active.Store(nil) })
+
+	p.update(engine.ProgressEvent{
+		Total: 9, Complete: 1,
+		Steps: []engine.ProgressStep{
+			{Control: "images", Scanner: "trivy", Total: 4, Done: 1, Running: 2},
+			{Control: "infrastructure", Scanner: "kube-bench", Total: 5, Done: 0, Running: 1, Failed: 2},
+		},
+	})
+
+	var rows int
+	for _, line := range strings.Split(buf.String(), "\n") {
+		rows++
+		if cells := visibleCells(line); cells > width {
+			t.Errorf("a line of %d cells wraps in a %d-column window: %q", cells, width, line)
+		}
+	}
+	if rows != p.drawn {
+		t.Errorf("drew %d rows and recorded %d, so the erase will land on the wrong lines", rows, p.drawn)
+	}
+}
+
+// Nothing to measure against, so nothing is cut: a line is better long than truncated on a guess.
+func TestAnUnknownWidthCutsNothing(t *testing.T) {
+	var full, unknown bytes.Buffer
+	ev := engine.ProgressEvent{
+		Total: 9, Complete: 1,
+		Steps: []engine.ProgressStep{{Control: "infrastructure", Scanner: "kube-bench", Total: 5, Running: 1}},
+	}
+	t.Cleanup(func() { active.Store(nil) })
+	(&progressLine{w: &full, columns: func() int { return 200 }}).update(ev)
+	(&progressLine{w: &unknown}).update(ev)
+	if full.String() != unknown.String() {
+		t.Errorf("a window too wide to matter and no window at all should render the same:\n%q\n%q",
+			full.String(), unknown.String())
+	}
+}
+
+// visibleCells counts the character cells a rendered line occupies, ignoring the escapes that
+// carry color and the control sequence each line is prefixed with.
+func visibleCells(line string) int {
+	line = strings.TrimPrefix(line, "\r\033[2K")
+	line = strings.TrimPrefix(line, "\r")
+	return len([]rune(tui.Truncate(line, 1<<30))) - escapeRunes(line)
+}
+
+func escapeRunes(s string) int {
+	var n int
+	for _, m := range regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]").FindAllString(s, -1) {
+		n += len([]rune(m))
+	}
+	return n
+}
+
+// countingWriter records how many Write calls it received, which is what decides whether a
+// terminal can render half a frame.
+// Not an embedded bytes.Buffer: that promotes WriteString, which io.WriteString prefers over
+// Write, so every frame would arrive uncounted.
+type countingWriter struct {
+	buf    bytes.Buffer
+	writes int
+}
+
+func (c *countingWriter) Write(b []byte) (int, error) {
+	c.writes++
+	return c.buf.Write(b)
+}
+
+// A frame the terminal receives in pieces is a frame it can draw in pieces, and the pieces are
+// what a reader sees as flicker.
+func TestAFrameReachesTheTerminalInOneWrite(t *testing.T) {
+	var w countingWriter
+	p := &progressLine{w: &w}
+	t.Cleanup(func() { active.Store(nil) })
+
+	p.update(engine.ProgressEvent{
+		Total: 9, Complete: 1,
+		Steps: []engine.ProgressStep{
+			{Control: "images", Scanner: "trivy", Total: 4, Done: 1, Running: 2},
+			{Control: "sca", Scanner: "trivy-fs", Total: 5, Done: 0, Running: 1},
+		},
+	})
+	if w.writes != 1 {
+		t.Errorf("a repaint took %d writes, so the terminal can render a frame it has only half received", w.writes)
+	}
+}
+
+// The ticker repaints while a slow job runs. A frame that says exactly what is already on the
+// terminal costs a write and buys nothing.
+func TestARepaintWithNothingNewSaysNothing(t *testing.T) {
+	var w countingWriter
+	// Started just now, so the headline stays quiet and the frame carries no clock. A duration is
+	// legitimately part of a frame, and two repaints either side of a second really are different.
+	p := &progressLine{w: &w, start: time.Now()}
+	t.Cleanup(func() { active.Store(nil) })
+
+	ev := engine.ProgressEvent{
+		Total: 9, Complete: 1,
+		Steps: []engine.ProgressStep{{Control: "sca", Scanner: "trivy-fs", Total: 5, Running: 1}},
+	}
+	p.update(ev)
+	first := w.writes
+	p.update(ev)
+	if w.writes != first {
+		t.Errorf("an identical frame was written again (%d writes, want %d)", w.writes, first)
+	}
+}
+
+// A row cleared and then filled is a row that was briefly empty, and because the old erase walked
+// up a line at a time the emptiness climbed the block in front of whoever was watching. Content
+// first, erase to the end of the line after it, so no row is ever blank between two states.
+func TestARepaintNeverBlanksARowItIsAboutToFill(t *testing.T) {
+	var buf bytes.Buffer
+	p := &progressLine{w: &buf}
+	t.Cleanup(func() { active.Store(nil) })
+
+	p.update(engine.ProgressEvent{Total: 9, Complete: 1,
+		Steps: []engine.ProgressStep{{Control: "sca", Scanner: "trivy-fs", Total: 5, Running: 1}}})
+	buf.Reset()
+	p.update(engine.ProgressEvent{Total: 9, Complete: 4,
+		Steps: []engine.ProgressStep{{Control: "sca", Scanner: "trivy-fs", Total: 5, Done: 3, Running: 1}}})
+
+	if out := buf.String(); strings.Contains(out, "\x1b[2K") {
+		t.Errorf("a repaint blanks a whole row before rewriting it: %q", out)
+	}
+}
+
+// A frame with fewer rows than the last leaves the surplus behind unless it clears them, and a
+// stale row under a live frame reads as part of it.
+func TestAShorterFrameClearsTheRowsItGaveUp(t *testing.T) {
+	var buf bytes.Buffer
+	p := &progressLine{w: &buf}
+	t.Cleanup(func() { active.Store(nil) })
+
+	p.update(engine.ProgressEvent{Total: 9, Complete: 1,
+		Steps: []engine.ProgressStep{
+			{Control: "images", Scanner: "trivy", Total: 4, Running: 2},
+			{Control: "sca", Scanner: "trivy-fs", Total: 5, Running: 1},
+		}})
+	tall := p.drawn
+	buf.Reset()
+	p.update(engine.ProgressEvent{Total: 9, Complete: 9})
+
+	if p.drawn >= tall {
+		t.Fatalf("the frame did not shrink: %d rows then %d", tall, p.drawn)
+	}
+	if out := buf.String(); !strings.Contains(out, "\x1b[K") {
+		t.Errorf("the rows it gave up were not cleared: %q", out)
 	}
 }

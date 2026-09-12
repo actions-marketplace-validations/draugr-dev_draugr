@@ -9,8 +9,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/draugr-dev/draugr/pkg/sarif"
 )
 
 // validDigest reports whether s is an OCI content digest of the form "algorithm:hex"
@@ -50,31 +48,27 @@ func (m *Model) Validate() error {
 		errs = append(errs, errors.New("release.version is required"))
 	}
 
-	// Both set and disagreeing is the one case that cannot be resolved by preferring either: the
-	// descriptor states two different projects and no reading of it is the author's intent.
-	if m.Project != "" && m.Release.Name != "" && m.Project != m.Release.Name {
-		errs = append(errs, fmt.Errorf(
-			"project is %q and release.name is %q — they name the same thing, so remove "+
-				"release.name", m.Project, m.Release.Name))
-	}
 	if m.Project != "" && !projectName.MatchString(m.Project) {
 		errs = append(errs, fmt.Errorf(
 			"project %q: lowercase letters, digits and dashes, starting and ending with a letter "+
 				"or digit", m.Project))
 	}
 
-	errs = append(errs, validateControllerKeys("", m.Config.Controllers)...)
+	errs = append(errs, validateControllerKeys("", m.Config.Controls)...)
 
 	errs = append(errs, validateComponents(m.Components)...)
 	errs = append(errs, m.Config.AllowEffects.validate()...)
 
-	for i, r := range m.Config.Reports {
-		if r.Format == "" {
-			errs = append(errs, fmt.Errorf("config.reports[%d].format is required", i))
-		}
-		if r.MinPriority != "" && !slices.Contains(Priorities, r.MinPriority) {
-			errs = append(errs, fmt.Errorf("config.reports[%d].minPriority is %q, but a priority band is one of %v",
-				i, r.MinPriority, Priorities))
+	for i, p := range m.Config.Publishers {
+		for j, r := range p.Reports {
+			if r.Format == "" {
+				errs = append(errs, fmt.Errorf("config.publishers[%d].reports[%d].format is required", i, j))
+			}
+			if r.MinPriority != "" && !slices.Contains(Priorities, r.MinPriority) {
+				errs = append(errs, fmt.Errorf(
+					"config.publishers[%d].reports[%d].minPriority is %q, but a priority band is one of %v",
+					i, j, r.MinPriority, Priorities))
+			}
 		}
 	}
 	if g := m.Config.Gate; g != nil {
@@ -82,11 +76,54 @@ func (m *Model) Validate() error {
 			errs = append(errs, fmt.Errorf("config.gate.failOnPriority is %q, but a priority band is one of %v",
 				g.FailOnPriority, Priorities))
 		}
-		for control, want := range g.Controls {
-			if _, err := sarif.ParseSeverity(want); err != nil {
-				errs = append(errs, fmt.Errorf("config.gate.controls[%q] = %q is not a threshold (want one of %v)",
-					control, want, GateThresholds))
+		kind, _, err := ParseGate(g.FailOn)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("config.gate.failOn: %w", err))
+		}
+		// `failOnPriority` is the older spelling of the same decision. Refused beside `failOn`
+		// rather than resolved by a precedence nobody can see in the file, because whichever lost
+		// would be a rule sitting in a reviewed descriptor doing nothing.
+		if g.FailOn != "" && g.FailOnPriority != "" {
+			errs = append(errs, fmt.Errorf(
+				"config.gate sets both failOn and failOnPriority, which are two spellings of one "+
+					"decision. Write the band in failOn: it takes a band (%s) or a severity (%s)",
+				strings.Join(Priorities, ", "), strings.Join(gateSeverityWords(), ", ")))
+		}
+		// The same vocabulary throughout, because the run asks one question. A band under a
+		// severity gate, or a severity under a band gate, is a second question asked of one
+		// control and puts the reader back where two keys left them.
+		//
+		// Nothing written is not nothing in force. The gate defaults to a band, so a descriptor
+		// that sets only per-control thresholds has one to refine and simply did not write it
+		// down.
+		want := kind
+		if want == GateNone {
+			want = GatePriority
+		}
+		for control, value := range g.Controls {
+			got, _, err := ParseGate(value)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("config.gate.controls[%q]: %w", control, err))
+				continue
 			}
+			if got == want {
+				continue
+			}
+			// Which gate it disagrees with decides what to say. A reader who wrote `failOn` is
+			// told their two halves ask different questions; a reader who wrote none is told the
+			// default moved under them, which is what actually happened and is not their mistake.
+			if kind == GateNone && g.FailOnPriority == "" {
+				errs = append(errs, fmt.Errorf(
+					"config.gate.controls[%q] is %q and the gate it refines is the band %s, which "+
+						"asks the other question. Write `failOn: %s` to judge this run on "+
+						"severity, or write these thresholds as bands (%s)",
+					control, value, DefaultGateBand, value, strings.Join(Priorities, ", ")))
+				continue
+			}
+			errs = append(errs, fmt.Errorf(
+				"config.gate.controls[%q] is %q and config.gate.failOn asks the other "+
+					"question. One run, one vocabulary: write both as bands, or both as "+
+					"severities", control, value))
 		}
 	}
 	errs = append(errs, validateVEXSources("config", m.Config.VEXSources)...)
@@ -104,9 +141,9 @@ func (m *Model) Validate() error {
 					"config.exploitability.maxAge %q is not a duration (want e.g. 24h, 30m, 168h)", x.MaxAge))
 			}
 		}
-		// A path is anything else, and cannot be checked here — the descriptor may name a file
-		// this machine does not have, which is a legitimate thing for a shared descriptor to do
-		// and a scan-time error rather than a validation one.
+		// A path is anything else, and cannot be checked here, the descriptor may name a file this
+		// machine does not have, which is a legitimate thing for a shared descriptor to do and a
+		// scan-time error rather than a validation one.
 	}
 	if s := m.Config.SBOM; s != nil && s.Format != "" && !s.Format.Valid() {
 		errs = append(errs, fmt.Errorf("config.sbom.format %q is not a known format (want one of %v)", s.Format, SBOMFormats))
@@ -146,19 +183,19 @@ var removedControllerKeys = map[string]map[string]string{
 	// Empty on purpose. A key that names no scanner is already rejected with the list of keys
 	// the control does accept, which covers every rename without an entry here.
 	//
-	// This is for the case that error cannot serve: a setting whose replacement is not a
-	// renaming but a different shape, where knowing the old name is the only way to explain the
-	// new one. `infrastructure.mode` was one — it became per-scanner blocks — and there are no
-	// users to migrate today, so it is gone with it.
+	// This is for the case that error cannot serve: a setting whose replacement is not a renaming but
+	// a different shape, where knowing the old name is the only way to explain the new one.
+	// `infrastructure.mode` was one. It became per-scanner blocks. And there are no users to migrate
+	// today, so it is gone with it.
 }
 
 // validateControllerKeys rejects descriptor keys that do not follow the schema's convention.
 //
 // Every field in a Saga is camelCase. Controller settings are a free-form tree, so nothing in the
-// type system holds them to it, and a hyphenated key does not fail — it is simply never matched.
-// A scanner block written as `kube-bench-job: { enabled: true }` selects no scanner and produces
-// a scan that ran one fewer than asked for, reporting a pass on a benchmark half of which never
-// ran. Silence is the failure mode; this makes it an error at load, before any work is done.
+// type system holds them to it, and a hyphenated key does not fail. It is simply never matched. A
+// scanner block written as `kube-bench-job: { enabled: true }` selects no scanner and produces a
+// scan that ran one fewer than asked for, reporting a pass on a benchmark half of which never ran.
+// Silence is the failure mode; this makes it an error at load, before any work is done.
 // validateRepoScope rejects scope entries that cannot mean what they appear to.
 //
 // Caught at load rather than at scan time: a pattern that matches nothing narrows the scan
@@ -176,7 +213,7 @@ func validateRepoScope(where string, r Repository) []error {
 				errs = append(errs, fmt.Errorf("%s is empty", at))
 			case strings.HasPrefix(t, "/"):
 				errs = append(errs, fmt.Errorf(
-					"%s is absolute (%q) — scope is relative to the repository root", at, v))
+					"%s is absolute (%q), scope is relative to the repository root", at, v))
 			case t == ".." || strings.HasPrefix(t, "../") || strings.Contains(t, "/../"):
 				errs = append(errs, fmt.Errorf(
 					"%s escapes the repository (%q)", at, v))
@@ -202,7 +239,7 @@ func validateControllerKeys(where string, controllers map[string]ControllerSetti
 				continue
 			}
 			errs = append(errs, fmt.Errorf(
-				"%scontrollers.%s.%s: descriptor keys are camelCase — use %q",
+				"%scontrollers.%s.%s: descriptor keys are camelCase. Use %q",
 				where, control, key, camelCaseKey(key)))
 		}
 	}
@@ -218,7 +255,7 @@ func validateComponents(comps []Component) []error {
 	var errs []error
 	seen := map[string]bool{}
 	for i, c := range comps {
-		errs = append(errs, validateControllerKeys(fmt.Sprintf("components[%d].", i), c.Controllers)...)
+		errs = append(errs, validateControllerKeys(fmt.Sprintf("components[%d].", i), c.Controls)...)
 		where := fmt.Sprintf("components[%d]", i)
 		if c.Name == "" {
 			errs = append(errs, fmt.Errorf("%s: name is required", where))
@@ -236,10 +273,17 @@ func validateComponents(comps []Component) []error {
 		if c.Criticality != "" && !c.Criticality.Valid() {
 			errs = append(errs, fmt.Errorf("%s: invalid criticality %q (want one of %v)", where, c.Criticality, Criticalities))
 		}
+		if c.BuiltBy != "" && !c.BuiltBy.Valid() {
+			errs = append(errs, fmt.Errorf("%s: builtBy %q is not one of %v", where, c.BuiltBy, BuiltByValues))
+		}
 
 		for j, r := range c.Repositories {
 			if r.URL == "" {
 				errs = append(errs, fmt.Errorf("%s: repositories[%d].url is required", where, j))
+			}
+			if r.BuiltBy != "" && !r.BuiltBy.Valid() {
+				errs = append(errs, fmt.Errorf("%s: repositories[%d].builtBy %q is not one of %v",
+					where, j, r.BuiltBy, BuiltByValues))
 			}
 			errs = append(errs, validateRepoScope(fmt.Sprintf("%s: repositories[%d]", where, j), r)...)
 		}
@@ -264,12 +308,24 @@ func validateComponents(comps []Component) []error {
 			errs = append(errs, validateHostSpec(h.Spec, fmt.Sprintf("%s: hosts[%d].spec", where, j))...)
 		}
 		for j, infra := range c.Infrastructure {
-			// A misspelling here reads as "self", so the findings a managed control plane cannot
-			// act on stay at the top of the list — the descriptor claims a decision it is not
-			// making, and the run looks the same either way.
+			// A misspelling here reads as "self", so the findings a managed control plane cannot act on
+			// stay at the top of the list, the descriptor claims a decision it is not making, and the run
+			// looks the same either way.
 			if infra.OperatedBy != "" && !infra.OperatedBy.Valid() {
 				errs = append(errs, fmt.Errorf("%s: infrastructure[%d].operatedBy %q is not one of %v",
 					where, j, infra.OperatedBy, OperatedByValues))
+			}
+			// A kind nothing audits is dropped when jobs are planned, so the component is scanned
+			// for everything except the infrastructure it named and reads as covered. Refused
+			// here, where the descriptor can still be corrected, rather than at the point where
+			// the only symptom is a control that found nothing.
+			if strings.TrimSpace(infra.Kind) == "" {
+				errs = append(errs, fmt.Errorf("%s: infrastructure[%d].kind is required (one of %v)",
+					where, j, InfrastructureKinds))
+			} else if !ValidInfrastructureKind(infra.Kind) {
+				errs = append(errs, fmt.Errorf(
+					"%s: infrastructure[%d].kind %q is not a surface Draugr audits (it has %v)",
+					where, j, infra.Kind, InfrastructureKinds))
 			}
 		}
 	}
@@ -279,8 +335,8 @@ func validateComponents(comps []Component) []error {
 // validateHostAuth checks an endpoint's auth block.
 //
 // Every failure here is one that would otherwise surface as a scan that ran, found nothing, and
-// reported a pass — because an unauthenticated scan of an authenticated application tests the
-// login page and nothing behind it.
+// reported a pass, because an unauthenticated scan of an authenticated application tests the login
+// page and nothing behind it.
 func validateHostAuth(a *HostAuth, where string) []error {
 	if a == nil {
 		return nil
@@ -306,7 +362,7 @@ func validateHostAuth(a *HostAuth, where string) []error {
 	}
 	if strings.TrimSpace(a.TokenEnv) == "" {
 		errs = append(errs, fmt.Errorf(
-			"%s.tokenEnv is required — it names the environment variable holding the credential. "+
+			"%s.tokenEnv is required, it names the environment variable holding the credential. "+
 				"A descriptor is committed, so there is no field for the credential itself", where))
 	}
 	return errs
@@ -319,7 +375,7 @@ func validateHostSpec(spec *HostSpec, where string) []error {
 	}
 	var errs []error
 	if strings.TrimSpace(spec.Path) == "" {
-		errs = append(errs, fmt.Errorf("%s.path is required — the OpenAPI document to scan", where))
+		errs = append(errs, fmt.Errorf("%s.path is required, the OpenAPI document to scan", where))
 	}
 	// An empty list is not "no restriction": it describes a scan that sends nothing, which is a
 	// descriptor quietly not working. Absent means read-only; present means say what you accept.
@@ -355,7 +411,7 @@ func validateExclusions(rules []ExcludeRule, prefix string) []error {
 		// and a reviewer has nothing to judge. It is the cheapest guard against a scanner
 		// being quietly defanged.
 		if strings.TrimSpace(e.Reason) == "" {
-			errs = append(errs, fmt.Errorf("%s: reason is required — say why this is excluded", where))
+			errs = append(errs, fmt.Errorf("%s: reason is required. Say why this is excluded", where))
 		}
 		// A date that does not parse is worse than no date: the exclusion would keep suppressing
 		// forever while the descriptor claims it lapses, which is the belief this field exists
@@ -363,13 +419,13 @@ func validateExclusions(rules []ExcludeRule, prefix string) []error {
 		if e.Expires != "" {
 			if _, err := time.Parse(expiresLayout, e.Expires); err != nil {
 				errs = append(errs, fmt.Errorf(
-					"%s: expires must be a date as YYYY-MM-DD, got %q — an unreadable date would "+
+					"%s: expires must be a date as YYYY-MM-DD, got %q, an unreadable date would "+
 						"suppress indefinitely while claiming not to", where, e.Expires))
 			}
 		}
 		// Neither selector set would match every finding in the project.
 		if len(e.Paths) == 0 && len(e.Rules) == 0 {
-			errs = append(errs, fmt.Errorf("%s: set paths, rules, or both — an exclusion with neither would suppress everything", where))
+			errs = append(errs, fmt.Errorf("%s: set paths, rules, or both, an exclusion with neither would suppress everything", where))
 		}
 		for j, p := range e.Paths {
 			if strings.TrimSpace(p) == "" {
@@ -387,7 +443,7 @@ func validateExclusions(rules []ExcludeRule, prefix string) []error {
 			case !ValidVEXStatus(v.Status):
 				hint := ""
 				if v.Status == VEXUnderInvestigation {
-					hint = " — a finding you have suppressed is one you have finished investigating; " +
+					hint = ", a finding you have suppressed is one you have finished investigating; " +
 						"it is what Draugr already reports for findings nobody has triaged"
 				}
 				errs = append(errs, fmt.Errorf("%s: vex.status %q is not a status an exclusion may declare (want %s)%s",
@@ -396,7 +452,7 @@ func validateExclusions(rules []ExcludeRule, prefix string) []error {
 			if v.Justification != "" {
 				if v.Status != VEXNotAffected && v.Status != "" {
 					errs = append(errs, fmt.Errorf(
-						"%s: vex.justification applies only to status %s, not %q — it answers why the "+
+						"%s: vex.justification applies only to status %s, not %q, it answers why the "+
 							"product is unaffected", where, VEXNotAffected, v.Status))
 				} else if !ValidVEXJustification(v.Justification) {
 					errs = append(errs, fmt.Errorf(
@@ -416,19 +472,19 @@ func validateFragmentRefs(refs []FragmentRef, prefix string) []error {
 	for i, f := range refs {
 		where := fmt.Sprintf("%s[%d]", prefix, i)
 		if strings.TrimSpace(f.Path) == "" {
-			errs = append(errs, fmt.Errorf("%s: path is required — it selects which files to merge", where))
+			errs = append(errs, fmt.Errorf("%s: path is required, it selects which files to merge", where))
 		}
 		// A remote fragment with no revision is a gate that changes with no commit in your own
 		// repository. Refusing costs one line in the descriptor; defaulting to the default branch
 		// would make every scan quietly depend on somebody else's next push.
 		if f.Remote() && strings.TrimSpace(f.Revision) == "" {
 			errs = append(errs, fmt.Errorf(
-				"%s: revision is required when url is set — name a tag, branch or commit so the "+
+				"%s: revision is required when url is set. Name a tag, branch or commit so the "+
 					"fragment cannot change without a change here", where))
 		}
 		if !f.Remote() && f.Revision != "" {
 			errs = append(errs, fmt.Errorf(
-				"%s: revision applies only with url — a local path is read from this checkout", where))
+				"%s: revision applies only with url, a local path is read from this checkout", where))
 		}
 	}
 	return errs
@@ -441,7 +497,7 @@ func joinErrs(errs []error) error { return errors.Join(errs...) }
 //
 // Exactly one, refused rather than resolved by precedence. A source carrying both a path and a URL
 // is a descriptor whose author believed two different things about where the document lives, and
-// picking one silently means the run reads a document nobody meant — which then either excuses
+// picking one silently means the run reads a document nobody meant, which then either excuses
 // findings nobody excused, or excuses none and looks like a supplier with nothing to say.
 func validateVEXSources(where string, sources []VEXSource) []error {
 	var errs []error
@@ -463,11 +519,11 @@ func validateVEXSources(where string, sources []VEXSource) []error {
 			continue
 		case named > 1:
 			errs = append(errs, fmt.Errorf(
-				"%s: names more than one of path, url and repository — a source is one document", at))
+				"%s: names more than one of path, url and repository, a source is one document", at))
 			continue
 		}
 		if s.URL != "" && !strings.HasPrefix(s.URL, "https://") && !strings.HasPrefix(s.URL, "http://") {
-			errs = append(errs, fmt.Errorf("%s: url %q must be http(s) — use path for a local file", at, s.URL))
+			errs = append(errs, fmt.Errorf("%s: url %q must be http(s). Use path for a local file", at, s.URL))
 		}
 		if r := s.Repository; r != nil {
 			if r.URL == "" {
@@ -477,7 +533,7 @@ func validateVEXSources(where string, sources []VEXSource) []error {
 			// guessing at a conventional filename would make the descriptor's meaning depend on
 			// what a supplier happened to call their file.
 			if r.Path == "" {
-				errs = append(errs, fmt.Errorf("%s: repository.path is required — name the document inside the repository", at))
+				errs = append(errs, fmt.Errorf("%s: repository.path is required. Name the document inside the repository", at))
 			} else if filepath.IsAbs(r.Path) || strings.Contains(r.Path, "..") {
 				errs = append(errs, fmt.Errorf("%s: repository.path %q must be inside the repository", at, r.Path))
 			}

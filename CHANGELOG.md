@@ -12,6 +12,513 @@ and move it under a version on release.
 
 _Nothing yet._
 
+## [0.121.0] - 2026-09-12
+
+### Changed
+
+**A pipeline can post the work instead of the findings.** `--view actions` applies to `--format markdown`, so the pull-request comment groups a change into the things somebody would do and six advisories in one library are one upgrade. Set it once in the template rather than per run: `diff-view` on the GitHub Action, `DRAUGR_DIFF_VIEW` in the GitLab template, `--view` on the documented Azure step. The comment's summary carries a mark per state, which the terminal does not, because a terminal has the priority ramp to find a count by and a comment has one line somebody skims.
+
+**A rule that suppressed nothing stands apart from one that worked.** `config.exclude` entries and supplier statements that matched no finding were a clause appended to the count of the ones that did, at the same weight, with the line naming which rule was dead dimmer than either. They are their own `UNMATCHED` block now, a row each, keyed by what you would open and edit, and each VEX statement is named by the vulnerability and package that did not line up rather than counted. A descriptor claiming a decision it is not making is a thing to go and fix, not a number to read.
+
+**All three reports agree on where things are.** The console, the markdown and the HTML now run in one order: what argued with the ranking, then the controls, then the components, then what was accepted, then the findings, and last what stands behind the verdict. Everything describing the run rather than the findings, the gate, the SBOM, what was scanned, what each control measured against and which feeds were read, is one `Evidence` section at the end of each of them instead of bold paragraphs and stray italic lines between the tables.
+
+**`draugr diff` takes the same `--view` as `draugr scan`.** `findings` carries the finding's own sentence under each row, `compact` is one line each, and `actions` groups a change into the things somebody would do about it, so six advisories in one library are one upgrade. Everything the change touched is one table ranked by priority instead of four lists read in sequence, with what happened to each finding in its own column and, within a band, what needs somebody before what does not.
+
+**A diff row says what to upgrade to, and which verdict it was measured against.** The listing carried a CVSS score and the control's name and not the release that clears the finding, which is the only instruction on the row. It now shows the upgrade, the finding's own title, and the gate the verdict came from. Where no gate was asked for, no verdict is stated: `draugr diff` without `--fail-on-new` compares and exits 0, and a verdict nobody asked for would be inventing one.
+
+**`draugr diff --top` caps a listing that had no cap at all.** A diff across two Draugr versions printed sixty-nine lines into a pull-request comment. It is `0` by default, unlike `scan`, because a diff is already only what one change did and truncating it silently removes the thing the command exists to show.
+
+**The rendered reports say what the console says.** The markdown and HTML reports had drifted from every decision the console made: controls counted severities while the verdict beside them counted bands, the findings table carried a CVSS score and the control's name but not the release that clears the finding, what argued with the ranking was not reported at all, and everything set aside was one bold sentence. All three formats now answer in bands, name each signal and how many findings it moved, carry the upgrade and the finding's own title on the row, and give what was accepted a block. A rule that suppressed nothing is named in every format rather than only in the terminal.
+
+**The rendered reports account for each acceptance.** A count says how much was set aside and cannot say what anybody thought was acceptable about it, though every suppressed finding carries the reason. The file reports now carry a row per decision, with how many findings it covers, who signed it, when it lapses and why, and the terminal shows the same under `--evidence`. An acceptance nobody signed is marked rather than left to be noticed among the names.
+
+**Every report states the gate.** A verdict travels away from the machine that produced it, and the rule it was measured against did not travel with it.
+
+**The report says what a thing is and stops.** Seven notes in the HTML report opened with a description and then argued for the design after it, so the half a reader came for was the half they had to dig out. The argument is in the code where it belongs. Where a number needed a caption to stop it looking wrong, the number is labeled instead: the timing table's share column says what it is a share of.
+
+### Fixed
+
+**A finding whose acceptance ended is no longer called "reopened".** The word is issue-tracker vocabulary for something that was fixed and came back; nothing here was ever fixed. It is `unaccepted`, named for the decision that ended rather than for a regression that did not happen. `pkg/diff.Result.Reopened` is `Unaccepted`.
+
+**A diff ranks a critical nobody scored above a high that was scored.** The listing ordered on the CVSS score behind a severity, and not every scanner publishes one, so a finding raised to critical by an exploitation catalog sank beneath every scored high. Severity decides first now, and the score refines it where both have one, which is what the scan report already did.
+
+**A diff whose only change is an acceptance keeps its component column.** Which component a finding belongs to was decided from the new and fixed findings alone, so a change that only accepted or un-accepted something lost the column that answers whether the finding is yours.
+
+**The caching guide covers GitLab and Azure, not only GitHub.** Persisting Trivy's databases and Draugr's own result cache was shown as GitHub Actions YAML and nowhere else, so a reader on either of the other two systems got the reasoning and no way to act on it. Both now have the keys, the scoping each one does and does not give you, and where `--cache-read-only` belongs.
+
+**The progress display stops emptying itself before it repaints.** Each update cleared the block a row at a time, walking up the screen, and then drew the new frame, so the emptiness visibly climbed the rows in front of whoever was watching. A frame is now written over its predecessor in one go, a row at a time from the top with no blank state in between, and a repaint that would say exactly what is already on screen writes nothing at all.
+
+## [0.120.0] - 2026-09-12
+
+### Changed
+
+- **A control judged on its own threshold states it.** The gate read "fails on P1, except licenses
+  on P2", which asks a reader to hold the first clause and subtract from it. Each control now says
+  what it fails on, in the words the gate above it used.
+
+- **A JavaScript finding says what to upgrade to, in the column that says it.** retire.js findings
+  opened with the library and version, which the row already shows, and named the version that
+  clears them at the end of a sentence that was being cut to fit.
+
+- **One block says what moved your ranking.** KEV, EPSS, a control's floor and a reachability
+  analyzer each accounted for themselves somewhere else, in three registers a reader could not
+  compare. `SIGNALS` names each one and how many findings it moved, counted over the whole run
+  rather than the listed part of it. The feeds keep their dates under `--evidence`, where the rest
+  of what the run read is.
+
+- **The compact view drops what describes the run.** Components, reachability, what each control
+  was measured against and the block of things to try are gone from `--view compact`, which is for
+  somebody who already knows what they are looking at. What stays is the answer and anything saying
+  the answer is less than it appears.
+
+- **The compact view marks a moved band beside the band.** `P1 ↑` on the row, in place of the line
+  underneath naming what moved it, so the listing is one line per finding and still says which rows
+  were argued with. It also drops the controls block, keeping only a control that could not run.
+
+- **The controls block answers in bands.** It counted severities while the verdict, the components
+  and the gate all talk about priority, so the one block meant to summarize the run asked a reader
+  to hold two vocabularies and map between them. Severity stays where it is decided, on the
+  finding's own row, and a run that ranked nothing still falls back to what it has.
+
+- **The descriptor digest says what it is a digest of.** Eight characters of hex is not
+  self-evidently anything; it is the merged document, fragments folded in, which is what makes two
+  runs comparable when a descriptor is assembled from several files.
+
+- **The documentation shows the report the way it prints now.** Every quoted run in `docs/` and the
+  README's picture were refreshed from a real scan, including the blocks that changed name and the
+  ones that moved behind `--evidence`.
+
+- **The evidence is a section, below the findings.** Six paragraphs of provenance sat between the
+  verdict and the list, so a reader who asked for both was pushed off the screen by the half they
+  did not come for. What the run wrote, including an SBOM, is in there with it: Draugr writes a
+  report and a SARIF file without announcing either, and one artifact naming itself beside the
+  findings read as the important one.
+
+- **The reachability block stopped repeating itself.** It printed a standing sentence about what a
+  verdict does on every run that had one. What a verdict did is on the finding it moved.
+
+- **The run line says what to do about a slow scan.** How many jobs ran at once, and which control
+  took the most scanner time. It used to report how many jobs were answered by an identical one,
+  which is the scheduler's own bookkeeping and nothing a reader can act on.
+
+- **What was scanned is a table.** One row per repository, the host dropped because every row
+  carries the same one. A descriptor with fifty repositories printed fifty sentences each naming a
+  URL in the middle of it.
+
+- **What was set aside is one block.** `config.exclude`, a supplier's VEX and a directive in the
+  source each had a paragraph of their own, separated by blank lines, and a run with a couple of
+  exclusions spent a third of the screen on them. `ACCEPTED` gives each a row, and the expired and
+  matched-nothing cases fold into the row they belong to. Who accepted a finding moved to
+  `--evidence`, where the question it answers is asked; it is unchanged in report.json and the SARIF.
+
+### Fixed
+
+- **A critical nothing scored no longer sorts below a high that was.** The ranked list ordered on
+  the CVSS score behind a severity, and not every scanner publishes one, so a finding raised to
+  critical by CISA's exploited catalog sank beneath every scored high on a list headed "fix first".
+  Severity decides first now, and the score refines it where both have one.
+
+- **A line that explains a control no longer runs off the screen.** What each control was measured
+  against, and what a scanner could not narrow, wrap under themselves the way a control's errors
+  already do. The half a reader acts on is the end of those sentences, and a line that leaves the
+  screen keeps the name and takes away the reason.
+
+- **An analyzer accounts for itself beside its own counts.** What a reachability analyzer could not
+  cover was printed in the block naming what each control was measured against, where it sat apart
+  from the counts it qualifies and read as contradicting them. It is on the analyzer's own row now,
+  and it says where it could not look rather than making a claim about the repository, which a
+  component scoped by paths scans as several trees.
+
+- **How many jobs ran at once is reported only where it bound the run.** Concurrency is a ceiling,
+  and "30 jobs, 32 at a time" is arithmetic a reader tries to make add up and cannot.
+
+- **The docs are held to what the renderer prints.** A quoted run carrying a heading or a column
+  set Draugr has stopped printing now fails the build, and so does one too wide to be read where it
+  is published. Nothing checked that before: the goldens pin the layout and the tracking says which
+  documents quote it, and neither could see a document still showing a layout from two releases ago.
+
+## [0.119.1] - 2026-09-12
+
+### Fixed
+
+- **A mark never takes a line of its own.** A finding whose band was argued with opens its line
+  with `↑ KEV` or `↓ unreachable`, and where the sentence beside it did not fit, the mark used to
+  move to a line by itself. Two words between two rows that are one line each read as a row that
+  broke rather than one that is long, so the sentence gives way instead, cut at the width every
+  sentence Draugr prints is cut at.
+
+## [0.119.0] - 2026-09-12
+
+### Added
+
+- **`--view` replaces `--group` and `--compact`, which were one question asked twice.**
+  `--view findings` is the default, a row per finding with what argued with its band underneath;
+  `--view actions` leads the report with the work, one row per thing to do; `--view compact` gives
+  one line each, trimmed to your terminal, and in `json` and `sarif` strips indentation and relayed
+  rule prose for a consumer that parses rather than reads. Both old flags still work and name what
+  to write instead, and `config.output.group` became `config.output.view`.
+
+### Changed
+
+- **A band something argued with says so on the row.** A finding raised by KEV or EPSS, lowered by
+  a reachability analyzer, or floored by a control opens its line with a named mark (`↑ KEV`,
+  `↓ unreachable`) in that signal's own color, and the severity column shows the rating the band
+  was actually computed from rather than the scanner's original word three lines above the note
+  correcting it. The machine formats still carry what the scanner claimed.
+
+- **`draugr scan` output speaks the same visual language as the dashboard and the HTML report.**
+  The verdict, the priority bands and the per-control severity counts are filled chips in the
+  project's own colors, exactly matching on a terminal that can show them and falling back to the
+  sixteen every terminal has. P3 has a color of its own for the first time, so all four bands are
+  distinguishable. The run's elapsed time sits beside the verdict rather than only under
+  `--evidence`, and a finding that carries a link to its rule now carries one to the line it was
+  found on, pinned to the commit that was scanned.
+
+- The HTML report looks and works like the control plane. It carries the same palette and the same
+  priority ramp, in both themes, with a theme control that follows your machine until you tell it
+  otherwise. The findings list narrows the way the dashboard's does, by ticking values in a menu
+  rather than choosing one: P1 and P2 together, cumulative across priority, severity, control and
+  the component that was missing entirely. Every narrowing that is on shows as a chip you can take
+  off, and "Show everything" clears them. A "What to do" view leads, grouping findings into the
+  work that clears them, the same grouping `--view actions` prints, and clicking what an action
+  clears opens the list narrowed to exactly those findings. The controls section states what each
+  one found rather than laying four columns of mostly zeros, a repository with no remote says so
+  and names the checkout instead of printing a bare dot, and the run's elapsed time sits beside
+  the verdict rather than in the colophon.
+
+- **The tips at the end of a scan became one block of things you may try.** They were sentences
+  naming a flag in the middle of them, printed after a report that had just finished with a
+  different block of sentences. `TRY` lists what to type and why, a row each. What no control looks
+  at is its own `NOT CHECKED` block, and it now counts every control that examines a surface rather
+  than only the ones Draugr would suggest enabling.
+
+- **A finding says what to upgrade to before it says what is wrong.** The version that clears a
+  dependency finding is a column of its own, colored like a passing verdict, so it cannot be cut
+  off the end of a long advisory title. The title itself stops repeating the package: an advisory
+  that opens with its own name, and a distribution that repeats it, are trimmed down to the
+  sentence.
+
+- **A scan with nothing classified says what its bands mean, beside them.** With no component
+  declaring exposure or criticality, every one is read as public and critical, so the bands rank
+  severity alone. That used to be a tip at the foot of the report, where a reader met it after
+  taking the counts as a statement about their application.
+
+## [0.118.0] - 2026-09-11
+
+### Changed
+
+- A destination that can deliver only one thing renders it for itself. `kind: github`, `kind:
+  draugr-api` and the three sticky-comment publishers are complete instructions now: the format is
+  not a choice anybody makes, and a descriptor that had to name it was one that failed when
+  somebody forgot. `file` is the exception, because a directory has no format of its own, so it
+  says what goes in it.
+
+### Removed
+
+- `config.reports` is gone. A report is rendered for a destination, so it is named on the
+  destination that takes it: move each entry under the `config.publishers` entry it was for, which
+  is also where `filename` and `minPriority` now mean something. A descriptor still carrying it is
+  refused, with that sentence. For local artifacts and no destination at all, `-o <dir>` writes
+  `report.json` and `results.sarif` and `--report <format>` adds to them, which is what the key
+  never did.
+
+## [0.117.0] - 2026-09-11
+
+### Added
+
+- A publisher says what it is given. `config.publishers[].reports` narrows a destination to the
+  formats it is for, so writing HTML and JSON to a directory while posting a short markdown
+  summary to a pull request is now expressible: it was three formats handed to every destination,
+  each picking out what it recognized. `minPriority` and `filename` go under the destination that
+  needs them. `config.reports` still names the set every destination that does not narrow is
+  given, and is what `-o` writes with no publisher involved, so nothing that worked before
+  changes. Each distinct report is still rendered once, however many destinations ask for it.
+
+### Changed
+
+- The example descriptors write every control, every publisher and every scanner option. `dast`
+  and `threats` appeared in none of them, five of the six publishers appeared only in
+  `publishing.saga.yaml`, and twenty-four scanner options, the kube-bench and Mend blocks among
+  them, were in the schema and in no file anybody could copy. `examples/scanner-options.saga.yaml`
+  is new and holds the last of those. Three guards keep the set honest: a control, a publisher or
+  a scanner option added from now on fails the build until an example writes it.
+
+### Fixed
+
+- A cached scan result now names the commit it describes. A repository that declares no revision,
+  which is what `url: .` and most descriptors write, had one cache identity for its whole life, so
+  an entry outlived the commit it was computed from and the next run at any commit was served the
+  previous one's findings. The visible direction was a stale failure; the quiet one was a clean
+  answer about a commit that had just introduced a vulnerable dependency. Draugr resolves the
+  revision to a commit before building the key, and a repository whose revision cannot be resolved
+  is scanned and not cached rather than stored under a name that moves.
+
+- A destination written twice is refused instead of delivering twice. `config.publishers` is a
+  list and two entries of one kind may be deliberate, two directories or two servers, or a
+  mistake, and the two were written identically. Draugr now refuses a pair that does not differ in
+  the field which makes it a second destination, naming that field, which is `dir` for `file`,
+  `url` for `draugr-api`, `repo` for `github` and the sticky comment's `marker` for the rest.
+
+- A per-control gate threshold written as a priority band now decides something.
+  `config.gate.controls` has taken a band since the gate took one, and every band was parsed as a
+  severity, failed, and dropped, so the whole per-control block did nothing on a band gate, which
+  is the default. A control held to `P2` under a `P1` gate now fails on a P2, the console says
+  `fails on P1, except licenses on P2`, and `report.json` records what was applied rather than
+  what was written.
+
+- `config.gate.controls` no longer needs `config.gate.failOn` written above it. A descriptor that
+  set per-control thresholds and left the gate on the default was refused with "there is none to
+  refine", when the default gate is `P1` and there was one. A severity under that default band is
+  still refused, and now says the default moved rather than that the gate does not exist.
+
+- The main example recommends the gate Draugr recommends. `examples/draugr.saga.yaml` explained
+  that `P1` is the default and then set `failOn: high` on the next line, so anyone copying it got
+  a severity gate and the explanation read as advice against itself. It writes `failOn: P1`, with
+  the severity form named as the alternative, and its per-control thresholds are bands rather than
+  severities under a band gate, which is a pairing Draugr refuses.
+
+## [0.116.0] - 2026-09-11
+
+### Added
+
+- `draugr scan` refuses a gate the descriptor's own classifications cannot produce, instead of
+  passing every run in silence. A component declared `restricted` and `important` ranks a critical
+  finding `P2`, so a gate on `P1` there could never fire; the message names the classification,
+  the band it does reach, and the three things you can do about it. Where only some components are
+  out of reach the run says so and continues. A control that declares a priority floor keeps its
+  band reachable, so enabling `secrets` on a restricted component is not reported as a dead gate.
+
+- `report.json` now records the gate the verdict was judged against, in a `gate` block: the
+  severity threshold, any per-control overrides, the priority band when one is set, and whether
+  `--no-gate` was set. A consumer reading the document could see that a run failed and not which
+  rule produced it, so the answer to "why is this red" lived only in a descriptor that may not
+  travel with the report. The threshold is always written out, including the default, because
+  nothing downstream can look up what our default is.
+
+### Changed
+
+- A publisher that cannot use anything you render is refused when the descriptor loads, not after
+  the scan. `config.publishers: [{kind: github}]` with no `sarif` under `config.reports` used to
+  cost a whole pipeline to discover, and the message came from the publisher, telling you to go
+  and edit a different block. Each publisher now declares the formats it delivers, `draugr
+  validate` and `draugr scan` both check the pairing up front, and the reference table says what
+  each one needs.
+
+- **A run has one gate, written in one field.** `config.gate.failOn` and `--fail-on` now take
+  either vocabulary: a priority band (`P1`-`P4`), which folds in the exposure and criticality your
+  descriptor declares, or a severity (`critical`, `high`, `medium`, `low`), which is what the
+  scanner called the flaw on its own terms. One field rather than two, so writing both is not
+  expressible, a verdict with two possible reasons cannot be read back to the rule that produced
+  it. `config.gate.controls` takes the same vocabulary as the gate it refines, and `draugr diff`'s
+  `--fail-on-new` works the same way. `failOnPriority`, `--fail-on-priority` and
+  `--fail-on-new-priority` are the older spellings of the band and still work.
+
+- **Concept and how-to pages describe the console rather than paste a run.** A pasted scan carries
+  package names and counts that go stale with nothing noticing, so `what-to-fix-first` and
+  `caching-and-performance` now say what the shape is. `TestEveryPasteOfTheConsoleIsTracked` keeps
+  the pages that do paste on the list a layout change refreshes.
+
+- `config.controls` replaces `config.controllers`, and `controls:` replaces `controllers:` on a
+  component. It is the word every other surface uses: `draugr controls` lists them, the catalog
+  names them, every concept behind a `?` calls them controls, and `config.gate.controls` said it
+  already, seventeen lines from the key that did not. The older spelling still loads and is folded
+  into the new one when a descriptor is read, so no existing descriptor breaks.
+
+- `config.gate.failOn` is new: a descriptor could set per-control thresholds and a priority band
+  and not the threshold that failed most of its builds, which was settable only as a flag every
+  pipeline had to remember and nothing reviewed.
+
+- **One separator throughout the output.** Reports separate a label from what follows with `·`,
+  the separator the rest of the output already used, in place of an em dash: `Draugr · FAIL`, `Fix
+  first · 5 actions clear 6 findings`, `↑ ranked as critical · on KEV`. Error messages read as
+  sentences rather than clauses joined by a dash. Anything parsing the console text should read
+  the machine formats instead.
+
+- **The default gate is now the priority band `P1`, not `high` severity.** Severity rates a flaw
+  in the abstract; priority folds in the exposure and criticality your descriptor declares, which
+  is context no scanner can compute, and it is the ranking Draugr exists to produce. On a
+  component that declares nothing, `P1` catches exactly what `--fail-on high` caught. On a
+  component you have classified, the gate now follows what you said about it.
+
+- Your editor now completes `config.reachability.analyzers` and flags a name Draugr does not have,
+  instead of accepting any string. The schema is generated from the same registry the planner
+  reads, so a new analyzer is offered the moment it is registered.
+
+### Fixed
+
+- A descriptor error now names the key you wrote. A misspelling under `config.gate` reported
+  `unknown field "failOnn" in gateconfig`, a word that appears nowhere in a descriptor, in the
+  reference, or in the page the message links to. It now says `in config.gate`, which is the
+  heading that page is indexed by, for every section of the file.
+
+- `draugr validate` now refuses an `infrastructure.kind` Draugr does not audit, and the Saga
+  schema offers the values it does. A kind nothing serves was dropped when jobs were planned, so a
+  component declaring `kind: k8s` was scanned for everything except the infrastructure it named
+  and read as covered.
+
+- `report.json`'s `gate` block names one gate. It filled in `"threshold": "high"` whenever no
+  severity threshold was set, so a run judged on the priority band wrote a document claiming both:
+  the console said `Gate: fails on P1.` and the file said
+  `{"threshold":"high","failOnPriority":"P1"}`. Exactly one of the two is present now, whichever
+  the run actually asked.
+
+- `report.json`'s priority counts are what the gate judged. They counted findings a
+  `config.exclude` rule had set aside, and counted a flaw twice when two scanners both found it,
+  so the console and `report.json` reported different numbers for one run: enabling the opt-in
+  second matcher took a project from 4 P1 to 8 with nothing new wrong. Excused findings are now
+  counted apart in a `suppressed` block rather than dropped, and each entry in `findings` says
+  whether it was excused, with the reason and who accepted it.
+
+- `results.sarif` marks a finding that is a second scanner's copy of a flaw already counted, with
+  `properties.correlation.countedUnder`, and the counted one carries `alsoFoundBy` with each other
+  tool's own rule id and rating. Nothing in the file said which was which, so GitHub code scanning
+  opened eighteen alerts for nine vulnerabilities and dismissing one left its twin open under the
+  other tool's rule id. `draugr diff`'s gate now skips the copies too: a pull request should not
+  fail over findings that arrived because somebody enabled a second matcher.
+
+- The `draugr diff` help and the reference now describe one gate. `--fail-on-new` takes a priority
+  band or a severity, `--fail-on-new-priority` is deprecated alongside `--fail-on-priority`, and
+  the examples that still wrote the deprecated spelling write the current one.
+
+- The progress display no longer erases lines it did not draw. On a window narrow enough to wrap
+  one of its rows, each repaint moved the cursor up one row short and cleared whatever was above,
+  so a scan quietly ate the output that was on screen before it started. Rows are now cut to the
+  window.
+
+### Security
+
+- Upgraded `google.golang.org/grpc` to 1.83.2, which fixes CVE-2026-84445: a gRPC-Go xDS server
+  could be crashed by a request missing its `:authority` and `Host` headers. It reaches Draugr as
+  an indirect dependency of the OpenTelemetry OTLP exporter, and Draugr runs no xDS server, so
+  nothing here was exploitable; the dependency is upgraded because a known-vulnerable version in
+  the tree is a finding Draugr would report on anybody else.
+
+## [0.115.0] - 2026-09-06
+
+### Added
+
+- A finding raised by KEV now also records what EPSS said about it, where EPSS reached the same
+  CVE. KEV still decides the rating — observed exploitation outranks a prediction about it — but
+  the prediction is no longer discarded, so anything counting how often EPSS matters counts what
+  it reached rather than what it won. It appears as `alsoMatched` on the escalation in
+  `--format sarif` and in published evidence.
+
+### Changed
+
+- The hosted and self-hosted control plane is called **Draugr Server**. It was "Draugr Cloud",
+  which was wrong for the deployment it names in the same sentence: the same artifact runs hosted
+  and on your own infrastructure, and half of that is not a cloud. The product is Draugr either
+  way; how you run it is the only difference.
+
+## [0.114.0] - 2026-09-03
+
+### Added
+
+- **`draugr tools install govulncheck` works.** govulncheck was the one scanner Draugr could not
+  provision — it publishes no release binary, existing only as a Go package path — so a descriptor
+  asking for reachability meant installing a scanner by hand beside the tool that manages
+  scanners. It now installs like every other: pinned, and verified against the Go checksum
+  database, which covers every module in the build rather than one archive.
+
+  It needs a Go toolchain, since building it is how it is obtained. Without one the error names
+  Go and the `go install` line that does the same job; an install that cannot reach the checksum
+  database still succeeds and is recorded as `unverified` rather than claiming a check that did
+  not happen.
+
+  `draugr tools list` also reports govulncheck's own version now. Its `-version` output names the
+  Go toolchain first, so it had been reporting that instead — a number that is real, plausible,
+  and about something else.
+
+### Changed
+
+- The prioritization guide now prints both ranking matrices in full, the CVSS score ranges behind
+  each severity band, and four findings worked through from score to band — including the same CVE
+  landing in two different bands on two components. It also names the difference between
+  `criticality: critical`, which describes a component, and `severity: critical`, which describes a
+  flaw.
+
+### Fixed
+
+- **`draugr doctor` now asks for the reachability analyzer a descriptor names.** A Saga with
+  `config.reachability.analyzers` passed `doctor` clean and the scan then stopped on a missing
+  analyzer — the one command whose job is answering "will this run?" answering yes because the
+  analyzer is deliberately not selectable from a scanner block and so was filtered out with every
+  scanner the control would not run. It is asked for when the control that would run it is
+  enabled, and not otherwise.
+
+### Security
+
+- Draugr's own build takes `google.golang.org/grpc` 1.83.1, which fixes CVE-2026-84304. The
+  package arrives through the OpenTelemetry OTLP exporter, so it is only reached when a Draugr
+  run is configured to export traces or metrics over gRPC.
+
+## [0.113.0] - 2026-09-01
+
+### Removed
+
+- **`release.name` is gone.** It named the project, which is what the top-level `project` names,
+  and two fields for one identity meant a descriptor could state two. Move the value up —
+  `project: payments-api` — and a release keeps only its version. A descriptor still carrying it is
+  refused, with that sentence.
+
+  `draugr validate` no longer prints deprecation notices, because there is nothing left to
+  deprecate; it prints the error instead, on the file, when the field is still there.
+
+  A report a template renders gains `{{.Project}}`. `{{.Release.Name}}` was the only way to print
+  what a scan was about, and a release now carries a version and nothing else.
+
+### Fixed
+
+- `report.json` written by `draugr scan -o <dir>` names the project. It carried the release's name
+  and nothing else, so a platform reading the file had nothing to file the run under.
+- A VEX document for a descriptor that names no project omits the product identifier rather than
+  publishing `pkg:generic/@2.4.0` — a package URL with no name in it, which a consumer reads,
+  understands, and matches against nothing.
+
+## [0.112.0] - 2026-08-31
+
+### Added
+
+- `builtBy` now works on a **repository** and on a **component**, not only on an image. Declare it
+  once on a component that is entirely somebody else's software and it covers every target under
+  it; a repository or an image may override it. It changes what the report tells you to do and
+  nothing else — the finding keeps its severity and its band, is still counted, and still reaches
+  the gate. Licenses are where it is felt most: a denied license in the dependency tree of a
+  repository you do not publish is not one you chose and not one you can swap out, so the report
+  stops telling you to change code you do not own.
+
+- The `licenses` control now scans a component's **images** as well as its repositories. A license
+  obligation inside a deployed image used to be invisible — and silently so, because the control
+  ran and reported covered — which landed hardest on third-party images, where the source
+  repository is not declared because the team does not build it. Nothing to change in your
+  descriptor: `licenses: enabled: true` covers both, with the same policy.
+- `licenses` gained `trivyLicense.full: true`, which turns on Trivy's `--license-full` to read
+  `LICENSE` files and source headers rather than only package metadata. It finds licenses no
+  manifest declares, and walks every file to do it — so a pull-request gate probably wants the
+  fast answer and a release probably wants this one.
+
+### Fixed
+
+- `examples/` now writes every field a Saga descriptor has. `builtBy` on an image somebody else
+  publishes, exclusions carrying `acceptedBy`, `expires` and a VEX status, exploitability feeds,
+  fragments, SBOM scope, per-control gate thresholds, host authentication and OpenAPI-driven
+  scans, and `operatedBy` on a managed cluster were all documented and in the schema without
+  appearing in a single file anybody could copy. New examples: accepting a finding on the record,
+  ranking on exploitability, and a root descriptor collecting fragments from the teams that own
+  the code.
+
+## [0.111.1] - 2026-08-30
+
+### Fixed
+
+**A dependency finding names the line that declared the package again.** Draugr reads Trivy's JSON rather than its SARIF, because the SARIF states the package only in prose — but the JSON carries no line, so an `sca` finding pointed at `requirements.txt` and no further, and a reader had to search the file for a name Draugr already knew. The line is read back from the manifest, the same way license findings already resolve theirs. Where it cannot be, it is absent rather than guessed: the finding still names the file.
+
+**A project SBOM says what it is a bill of materials for.** The assembled document named its root component from `release.name`, which `project:` replaced — so a descriptor written the way the reference recommends produced a published artifact whose root had an empty name and a `bom-ref` of `draugr:release/`. Nothing about the document looked wrong. It is named from the project now, and the assembler is handed it rather than having to find it in a field that no longer carries it.
+
+**A report names its project again when the descriptor uses `project:`.** Six places rendered the deprecated `release.name` directly, so a descriptor written the way the reference recommends — `project:` at the top level, no `release.name` — produced a console, Markdown and HTML report with no release line, an evidence bundle labeled "unnamed release", and a VEX document with **no author** and a product identifier of `pkg:generic/@2.4.0`, which is not a package URL. A VEX statement nothing matches is read, understood and applied to nothing.
+
+**`draugr init` writes the field the docs tell you to use.** The scaffold wrote `release.name`, which `draugr validate` — the very next step of the quickstart — then warned about, on a descriptor Draugr had just written itself. `draugr survey` and the MCP server's descriptor scaffold did the same, and both name the flag "project name" now rather than "release name".
+
 ## [0.111.0] - 2026-08-29
 
 ### Added
@@ -5116,7 +5623,19 @@ First public preview of Draugr.
 - **Early preview** — the CLI and the Saga schema may change before 1.0.
 - Requires **Trivy** on your `PATH` (and `git` for repository scans).
 
-[Unreleased]: https://github.com/draugr-dev/draugr/compare/v0.111.0...HEAD
+[Unreleased]: https://github.com/draugr-dev/draugr/compare/v0.121.0...HEAD
+[0.121.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.121.0
+[0.120.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.120.0
+[0.119.1]: https://github.com/draugr-dev/draugr/releases/tag/v0.119.1
+[0.119.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.119.0
+[0.118.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.118.0
+[0.117.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.117.0
+[0.116.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.116.0
+[0.115.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.115.0
+[0.114.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.114.0
+[0.113.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.113.0
+[0.112.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.112.0
+[0.111.1]: https://github.com/draugr-dev/draugr/releases/tag/v0.111.1
 [0.111.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.111.0
 [0.110.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.110.0
 [0.109.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.109.0

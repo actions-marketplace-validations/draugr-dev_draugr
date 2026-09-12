@@ -2,15 +2,15 @@
 // the contract for producing one.
 //
 // An SBOM is deliberately *not* a control. A control answers "did this check find anything?",
-// and its verdict feeds the gate. An SBOM finds nothing — it is an inventory. Modeling it as a
+// and its verdict feeds the gate. An SBOM finds nothing. It is an inventory. Modeling it as a
 // control would put a row in the results table that always reads "pass" without ever having
 // looked, which is exactly the meaningless green Draugr exists to remove. So SBOMs travel as
 // evidence: produced during a run, attached to the output, never consulted for the verdict.
 //
 // The generator that shells out to Syft lives in internal/sbom. This package holds only what
 // callers need to name, so pkg/ keeps its rule of not importing internal/. Turning documents
-// into deliverable artifacts lives in pkg/report, which owns the Artifact type — putting it
-// here would make pkg/sbom import pkg/report, which imports pkg/engine, which imports this.
+// into deliverable artifacts lives in pkg/report, which owns the Artifact type. Putting it here
+// would make pkg/sbom import pkg/report, which imports pkg/engine, which imports this.
 package sbom
 
 import (
@@ -49,7 +49,7 @@ type Generator interface {
 
 // Assembler combines per-target documents into one covering the whole release.
 //
-// Optional, and discovered by type assertion on the Generator — the same shape as the scanner
+// Optional, and discovered by type assertion on the Generator, the same shape as the scanner
 // SDK's CacheVersioner and Prewarmer. A generator that cannot assemble is not broken; it just
 // cannot serve `scope: project`, and the engine says so rather than quietly emitting the parts.
 //
@@ -57,5 +57,9 @@ type Generator interface {
 // they relate; this one is handed the release and the components, which is the hierarchy the
 // assembled document needs and the reason its output can be more than a concatenation.
 type Assembler interface {
-	Assemble(release saga.Release, format saga.SBOMFormat, docs []Document) (Document, error)
+	//
+	// `project` is the name the document describes itself by, and is passed separately because it
+	// is not part of the release: `release` carries the version, and the name it used to carry is
+	// gone. An assembler handed only the release could not name what it had assembled.
+	Assemble(project string, release saga.Release, format saga.SBOMFormat, docs []Document) (Document, error)
 }

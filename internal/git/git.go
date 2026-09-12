@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -28,7 +29,7 @@ type Tree struct {
 	// which, so nothing has to infer it from a count.
 	Dirty int
 	// WorkingTree reports that this copy came from a checkout on disk, uncommitted work included,
-	// rather than from a commit — so it is not reproducible.
+	// rather than from a commit. So it is not reproducible.
 	WorkingTree bool
 }
 
@@ -44,8 +45,8 @@ func Checkout(ctx context.Context, url, revision string, scope Scope) (tree Tree
 	cleanup = func() { _ = os.RemoveAll(dir) }
 
 	// Both optimizations are off when history is wanted. A shallow clone has no history, and a
-	// partial one has history whose blobs were never fetched — which walks commits it cannot read
-	// and finds nothing in them.
+	// partial one has history whose blobs were never fetched, which walks commits it cannot read and
+	// finds nothing in them.
 	sparse := len(coneDirs(scope.Paths)) > 0 && !scope.History
 	cloneArgs := []string{"clone", "--quiet"}
 	if revision == "" && !scope.History {
@@ -86,7 +87,7 @@ func Checkout(ctx context.Context, url, revision string, scope Scope) (tree Tree
 	}
 	if sparse {
 		// Cone mode is what keeps the root files: it materializes every selected directory, the
-		// directories above them, and the repository root — which is where the manifests and the
+		// directories above them, and the repository root. Which is where the manifests and the
 		// scanners' own configuration live.
 		args := append([]string{"-C", dir, "sparse-checkout", "set", "--cone"}, coneDirs(scope.Paths)...)
 		if err := gitRun(ctx, args...); err != nil {
@@ -114,7 +115,7 @@ func Checkout(ctx context.Context, url, revision string, scope Scope) (tree Tree
 //
 // A local checkout with edits in it is the normal state of somewhere someone is working. The
 // useful form of that fact is the report saying which commit it read and how much of the tree it
-// left out — not a warning on every run.
+// left out, not a warning on every run.
 //
 // Best effort on both counts: a checkout that cannot be interrogated still scans. Failing a scan
 // because `rev-parse` did not answer would trade a whole result for a line of provenance.
@@ -158,9 +159,9 @@ func retryPlain(ctx context.Context, dir, url, revision string) error {
 	return nil
 }
 
-// gitRun runs git. A var so a test can make one invocation fail — the fallback below is taken
-// only when a server refuses a partial clone, which is not something a local fixture can be
-// asked to do, and an untested fallback is one that breaks for whoever self-hosts.
+// gitRun runs git. A var so a test can make one invocation fail. The fallback below is taken only
+// when a server refuses a partial clone, which is not something a local fixture can be asked to
+// do, and an untested fallback is one that breaks for whoever self-hosts.
 var gitRun = func(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...) // #nosec G204 -- args are constructed, not shell-interpreted
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -173,8 +174,8 @@ var gitRun = func(ctx context.Context, args ...string) error {
 // the path is not local, or git cannot say.
 //
 // Exists because a local path is cloned like any other source: the scan sees the *committed*
-// state, not the files on disk. That is right — a scan has to describe a revision someone else
-// can reproduce — and it is invisible, so a change that introduces a finding passes until it is
+// state, not the files on disk. That is right. A scan has to describe a revision someone else can
+// reproduce. And it is invisible, so a change that introduces a finding passes until it is
 // committed. Best-effort: a scan must not fail because git could not answer a courtesy question.
 func UncommittedFiles(ctx context.Context, url string) int {
 	if !IsLocalPath(url) {
@@ -182,7 +183,7 @@ func UncommittedFiles(ctx context.Context, url string) int {
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", url, "status", "--porcelain").Output() // #nosec G204 -- the descriptor's own repository path
 	if err != nil {
-		return 0 // not a repository, or no git — the clone will say so properly
+		return 0 // not a repository, or no git; the clone will say so properly
 	}
 	n := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -208,12 +209,12 @@ func IsLocalPath(url string) bool {
 	return err == nil && info.IsDir()
 }
 
-// CheckoutWorkingTree copies a local checkout — including uncommitted work — into a temporary
+// CheckoutWorkingTree copies a local checkout. Including uncommitted work, into a temporary
 // directory and scopes it exactly as Checkout does.
 //
 // A copy rather than the path itself, which is the whole point. Scanning in place would mean a
 // tool writing its caches into somebody's repository, and `paths`/`ignore` are applied by deleting
-// what is not wanted — against a real checkout that is not scoping, it is data loss.
+// what is not wanted, against a real checkout that is not scoping, it is data loss.
 //
 // The file list comes from `git ls-files -co --exclude-standard`: tracked files plus untracked
 // ones that are not ignored. That is git's own answer to "what is in this working tree", so a
@@ -263,9 +264,9 @@ func CheckoutWorkingTree(ctx context.Context, path string, scope Scope) (Tree, f
 // copyInto copies one file from a working tree into the temporary copy, creating its parents.
 //
 // Both ends are checked to stay inside their root. git does not emit paths that escape a
-// repository, but this reads a list produced by a subprocess and then writes files from it — the
-// one place where being wrong writes outside the temporary directory, so it is checked rather
-// than assumed.
+// repository, but this reads a list produced by a subprocess and then writes files from it, the
+// one place where being wrong writes outside the temporary directory, so it is checked rather than
+// assumed.
 func copyInto(dstRoot, srcRoot, rel string) error {
 	src, err := containedPath(srcRoot, rel)
 	if err != nil {
@@ -282,8 +283,8 @@ func copyInto(dstRoot, srcRoot, rel string) error {
 		return nil //nolint:nilerr // deliberate: a vanished file is not a scan failure
 	}
 	if !info.Mode().IsRegular() {
-		// Directories arrive implicitly, and a symlink copied as a link could point outside the
-		// copy — which would put a scanner back in the real checkout.
+		// Directories arrive implicitly, and a symlink copied as a link could point outside the copy.
+		// Which would put a scanner back in the real checkout.
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
@@ -310,7 +311,7 @@ func containedPath(root, rel string) (string, error) {
 //
 // A local path says where a repository sits on one machine; the remote says which repository it
 // is. Those are different questions, and only the second belongs in a report, a cache key, or
-// anything handed to a third party — the same distinction that keeps credentials out of a
+// anything handed to a third party. The same distinction that keeps credentials out of a
 // repository's identity.
 //
 // Resolving it makes a laptop and a pipeline agree: `draugr scan .` and a CI run against the
@@ -345,4 +346,80 @@ func remote(ctx context.Context, path, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// commitSHA matches a full 40-character object name, which is the only revision that cannot mean
+// something different tomorrow.
+var commitSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// IsCommitSHA reports whether revision already names one commit for good.
+//
+// A branch or a tag is a name for whatever it points at now. Anything keyed on one describes a
+// moving target, which is fine for fetching and wrong for anything that has to stay true, and an
+// empty revision is the same problem with nothing written down.
+func IsCommitSHA(revision string) bool { return commitSHA.MatchString(revision) }
+
+// ResolveRevision returns the commit revision names in the repository at url.
+//
+// A local path is answered by `rev-parse`, which touches nothing outside the machine. A remote is
+// answered by `ls-remote`, one round trip against the same server a clone would use, and far
+// cheaper than the clone it lets a caller skip.
+//
+// An empty revision means the repository's default: HEAD locally, and the remote's own HEAD
+// otherwise, which is what a clone with no revision would check out.
+//
+// Errors rather than guessing. A caller that cannot learn the commit has to decide what to do
+// about that, and the one decision it must not make is to carry on using the name it was given as
+// though it were an answer.
+func ResolveRevision(ctx context.Context, url, revision string) (string, error) {
+	if IsCommitSHA(revision) {
+		return revision, nil
+	}
+	if IsLocalPath(url) {
+		ref := revision
+		if ref == "" {
+			ref = "HEAD"
+		}
+		out, err := exec.CommandContext(ctx, "git", "-C", url, "rev-parse", ref).Output() // #nosec G204 -- the descriptor's own repository path
+		if err != nil {
+			return "", fmt.Errorf("resolve %s in %s: %w", ref, url, err)
+		}
+		got := strings.TrimSpace(string(out))
+		if !IsCommitSHA(got) {
+			return "", fmt.Errorf("resolve %s in %s: %q is not a commit", ref, url, got)
+		}
+		return got, nil
+	}
+
+	args := []string{"ls-remote", "--quiet", url}
+	if revision != "" {
+		args = append(args, revision)
+	} else {
+		args = append(args, "HEAD")
+	}
+	// #nosec G204 -- the descriptor's own repository URL
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve %s in %s: %w", revision, url, err)
+	}
+	// `ls-remote <ref>` can answer with several lines: a tag and its dereferenced commit, or a
+	// branch and a tag sharing a name. The first line is the one a clone would take, and a `^{}`
+	// suffix marks the commit a tag points at, which is what a scan actually reads.
+	var first string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		name, ref, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok || !IsCommitSHA(name) {
+			continue
+		}
+		if strings.HasSuffix(ref, "^{}") {
+			return name, nil
+		}
+		if first == "" {
+			first = name
+		}
+	}
+	if first == "" {
+		return "", fmt.Errorf("resolve %s in %s: the remote names no such revision", revision, url)
+	}
+	return first, nil
 }

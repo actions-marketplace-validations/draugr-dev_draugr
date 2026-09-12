@@ -79,9 +79,9 @@ func TestSecretsAggregateEmpty(t *testing.T) {
 
 // The five controllers that named their scanner directly discarded the descriptor's block before
 // anything could look at it: an option written there neither took effect nor was reported, and
-// the scanner's declared schema — which exists to make that an error — was never consulted.
+// the scanner's declared schema. Which exists to make that an error. Was never consulted.
 func TestSecretsPassesTheScannerBlockThrough(t *testing.T) {
-	model := saga.Model{Config: saga.Config{Controllers: map[string]saga.ControllerSettings{
+	model := saga.Model{Config: saga.Config{Controls: map[string]saga.ControllerSettings{
 		"secrets": {"gitleaks": saga.ControllerSettings{"someOption": "value"}},
 	}}}
 	comp := &saga.Component{Name: "api", Repositories: []saga.Repository{{URL: "u"}}}
@@ -99,7 +99,7 @@ func TestSecretsPassesTheScannerBlockThrough(t *testing.T) {
 
 // And `enabled: false` on the only scanner now means what it says.
 func TestSecretsHonorsADisabledScanner(t *testing.T) {
-	model := saga.Model{Config: saga.Config{Controllers: map[string]saga.ControllerSettings{
+	model := saga.Model{Config: saga.Config{Controls: map[string]saga.ControllerSettings{
 		"secrets": {"gitleaks": saga.ControllerSettings{"enabled": false}},
 	}}}
 	comp := &saga.Component{Name: "api", Repositories: []saga.Repository{{URL: "u"}}}
@@ -114,7 +114,7 @@ func TestSecretsHonorsADisabledScanner(t *testing.T) {
 
 // Two repositories, because one proves the loop runs and two prove it does not collapse.
 func TestSecretsPlansOneJobPerRepositoryWithConfig(t *testing.T) {
-	model := saga.Model{Config: saga.Config{Controllers: map[string]saga.ControllerSettings{
+	model := saga.Model{Config: saga.Config{Controls: map[string]saga.ControllerSettings{
 		"secrets": {"gitleaks": saga.ControllerSettings{"someOption": "value"}},
 	}}}
 	comp := &saga.Component{Name: "api", Repositories: []saga.Repository{{URL: "a"}, {URL: "b"}}}

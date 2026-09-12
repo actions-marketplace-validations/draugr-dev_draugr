@@ -313,7 +313,8 @@ func TestExtractBinaryDispatch(t *testing.T) {
 
 func TestInstallableAndSpec(t *testing.T) {
 	names := Installable()
-	want := []string{"cosign", "gitleaks", "gosec", "grype", "kube-bench", "nuclei", "retire", "semgrep", "syft", "trivy"}
+	want := []string{"cosign", "gitleaks", "gosec", "govulncheck", "grype", "kube-bench",
+		"nuclei", "retire", "semgrep", "syft", "trivy"}
 	if len(names) < len(want) {
 		t.Fatalf("Installable() = %v, want at least %v", names, want)
 	}
@@ -356,9 +357,9 @@ func TestBinDir(t *testing.T) {
 	}
 }
 
-// Re-provisioning is the common case in CI. A tool already present at the pinned build must not
-// be downloaded again — but "already present" has to mean the exact bytes we installed, or a
-// modified binary would be silently accepted.
+// Re-provisioning is the common case in CI. A tool already present at the pinned build must not be
+// downloaded again. But "already present" has to mean the exact bytes we installed, or a modified
+// binary would be silently accepted.
 func TestInstallSkipsWhenAlreadyPresent(t *testing.T) {
 	content := []byte("#!/bin/sh\necho fake-tool\n")
 	archive := makeTarGz(t, "faketool", content)
@@ -420,8 +421,8 @@ func TestInstallForceReinstalls(t *testing.T) {
 	}
 }
 
-// The security-relevant case: if the installed binary has been modified, "already installed"
-// must not accept it — Draugr repairs it instead.
+// The security-relevant case: if the installed binary has been modified, "already installed" must
+// not accept it, Draugr repairs it instead.
 func TestInstallReplacesModifiedBinary(t *testing.T) {
 	content := []byte("#!/bin/sh\necho fake-tool\n")
 	archive := makeTarGz(t, "faketool", content)
@@ -606,7 +607,7 @@ func TestKubeBenchSpecCarriesItsData(t *testing.T) {
 //
 // The language-package installers are tested directly elsewhere, which proves they work and not
 // that anything reaches them. If this dispatch stopped matching, the command would fall through to
-// the release-archive path and fail looking for assets a package-managed tool has never had — and
+// the release-archive path and fail looking for assets a package-managed tool has never had, and
 // no test of the installers themselves would notice.
 func TestInstallVersionRoutesLanguagePackages(t *testing.T) {
 	t.Run("python package", func(t *testing.T) {

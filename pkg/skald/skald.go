@@ -1,5 +1,5 @@
 // Package skald renders scan results and verdicts into evidence: a JSON summary and
-// merged SARIF. A skald is the poet who records deeds — here, the record of a scan.
+// merged SARIF. A skald is the poet who records deeds, here, the record of a scan.
 package skald
 
 import (
@@ -30,28 +30,38 @@ type jsonReport struct {
 	// First, beside the verdict, because it qualifies it. A consumer reading this document has
 	// to be able to tell a verdict about the release from a verdict about part of it, and the
 	// rest of the document looks the same either way.
-	Scope    *scopeInfo      `json:"scope,omitempty"`
+	Scope *scopeInfo `json:"scope,omitempty"`
+	// Gate is the policy that turned the controls below into the verdict above. Without it a
+	// consumer has the outcome and not the rule, so "why did this fail" is answerable only from
+	// the descriptor in the repository, which is not in this document and may not be reachable
+	// from wherever it is being read.
+	Gate     *gateReport     `json:"gate,omitempty"`
 	Controls []controlReport `json:"controls"`
-	// NotMeasured names a scanner that was planned and then not run because it could not answer
-	// the question its target asked. Distinct from an error: nothing went wrong, and the run is
-	// not incomplete — but a scanner that quietly did not run is indistinguishable, in the rest
-	// of this document, from one that ran and found nothing.
+	// NotMeasured names a scanner that was planned and then not run because it could not answer the
+	// question its target asked. Distinct from an error: nothing went wrong, and the run is not
+	// incomplete, but a scanner that quietly did not run is indistinguishable, in the rest of this
+	// document, from one that ran and found nothing.
 	NotMeasured []notMeasuredReport `json:"notMeasured,omitempty"`
 	Priorities  *priorityCounts     `json:"priorities,omitempty"`
+	// Suppressed are the findings a config.exclude rule set aside, in the bands they were ranked
+	// into. Counted apart from Priorities rather than folded in: an excused finding is not work,
+	// and a count that mixes them says neither how much there is to do nor how much was signed off.
+	// Absent when nothing was excused.
+	Suppressed *suppressedCounts `json:"suppressed,omitempty"`
 	// Exploitability names the datasets that enriched this run's severities, so a report can
 	// be checked against the data it was computed from. Absent when no enrichment ran.
 	Exploitability []FeedProvenance `json:"exploitability,omitempty"`
 	// Reachability summarizes what reachability analysis concluded, so a consumer can see the
 	// analysis ran and how much of it landed. Absent when none ran.
 	Reachability *reachabilityInfo `json:"reachability,omitempty"`
-	// Repositories is which repository was read and at which commit — what makes the report
+	// Repositories is which repository was read and at which commit. What makes the report
 	// reproducible, and the answer to "does this describe my change or last week's".
 	Repositories []sarif.RepositoryRef `json:"repositories,omitempty"`
 	// Descriptor is the Saga that turned a repository into this set of checks.
 	//
-	// Without it the report says what was found and never what was asked for, so "why did this
-	// run cover sca and not images" has no answer from the artifact — and an exclusion that
-	// suppressed a finding came from a file nobody can name.
+	// Without it the report says what was found and never what was asked for, so "why did this run
+	// cover sca and not images" has no answer from the artifact, and an exclusion that suppressed a
+	// finding came from a file nobody can name.
 	Descriptor *DescriptorRef `json:"descriptor,omitempty"`
 	// CI is the job this scan ran in. Absent outside CI, and absent rather than guessed on a
 	// platform Draugr does not recognize.
@@ -75,6 +85,16 @@ type scopeInfo struct {
 	Components        []string `json:"components,omitempty"`
 	Controls          []string `json:"controls,omitempty"`
 	SkippedComponents []string `json:"skippedComponents,omitempty"`
+}
+
+// suppressedCounts are the excused findings, in the bands they were ranked into.
+//
+// Absent when nothing was excused, so a document with the block is one where somebody made a
+// decision rather than one reporting zero. Total is stated as well as the bands, because the
+// interesting question about a suppression is usually how many rather than which band.
+type suppressedCounts struct {
+	Total int `json:"total"`
+	priorityCounts
 }
 
 // priorityCounts tallies findings by priority band (present when prioritization ran).
@@ -102,16 +122,107 @@ type findingReport struct {
 	// the call path when it can. Same reason as Escalation, in the other direction: a consumer
 	// acting on a band that reachability lowered can say what lowered it.
 	Reachability *sarif.Reachability `json:"reachability,omitempty"`
+	// Suppressed says a config.exclude rule set this finding aside, with the reason somebody gave
+	// and who accepted it.
+	//
+	// Kept in the list rather than filtered out of it, which is what "suppress, don't delete"
+	// means where a machine reads it: an excused finding stays visible with its justification. It
+	// was in this list already and said nothing about itself, so it read as work, which is the
+	// half that made it wrong.
+	Suppressed *suppressionNote `json:"suppressed,omitempty"`
+}
+
+// suppressionNote is why a finding is not being counted as work, and who said so.
+type suppressionNote struct {
+	Justification string `json:"justification,omitempty"`
+	AcceptedBy    string `json:"acceptedBy,omitempty"`
 }
 
 // Provenance is what produced a run, as opposed to what it found.
 //
-// Grouped rather than added as two more parameters: these travel together, they are both absent
-// together in the common local case, and the renderer's signature is already long enough that a
-// caller passing them in the wrong order would compile.
+// Grouped rather than added as three more parameters: these travel together, and the renderer's
+// signature is already long enough that a caller passing them in the wrong order would compile.
 type Provenance struct {
 	Descriptor *DescriptorRef
 	CI         *ci.Context
+	// Gate is the policy the verdict was judged against. Absent on a document written by a caller
+	// that did not have it, which is why the field it renders is omitted rather than defaulted: a
+	// consumer must be able to tell "the gate was the default" from "nobody said".
+	Gate *Gate
+}
+
+// Gate is the policy a verdict was produced under, and whether it decided the exit code.
+//
+// The policy is norn's own rather than a copy of its four fields: a second declaration of the same
+// rule is a second thing to keep true, and the copy is the one that drifts.
+type Gate struct {
+	Policy norn.Policy
+	// Disabled is --no-gate: the verdict is reported and the command still exits 0.
+	Disabled bool
+}
+
+// gateReport is the gate as the JSON document states it.
+type gateReport struct {
+	// Threshold is the severity band that fails a control, on a run that gates on severity.
+	//
+	// Absent on a run that gates on the band, rather than empty: exactly one of this and
+	// FailOnPriority is set, because a run asks one question and a document naming both is the
+	// contradiction one descriptor field exists to prevent. An empty string would be a severity
+	// gate present and set to nothing, which is neither.
+	Threshold string `json:"threshold,omitempty"`
+	// PerControl are the controls judged against a different band. Only on a severity gate, which
+	// is the only kind they refine.
+	PerControl map[string]string `json:"perControl,omitempty"`
+	// FailOnPriority is the band that fails a control, on a run that gates on the band. Written
+	// out including the default, because nothing downstream can look up what our default is.
+	FailOnPriority string `json:"failOnPriority,omitempty"`
+	// Disabled says the verdict did not decide the exit code, so anything reading that code was
+	// told the opposite of what this document says.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
+// describeGate renders the gate, filling in the default threshold rather than emitting an empty
+// band. An unset threshold is our default, not an absent rule, and a reader cannot tell the two
+// apart from a blank.
+func describeGate(g *Gate) *gateReport {
+	if g == nil {
+		return nil
+	}
+	// One of the two, never both. An empty FailOn does not mean "the default severity" any more,
+	// it means this run asks the other question, and filling in a threshold there wrote a document
+	// claiming a severity gate that was not in force beside the band that was. The console said
+	// `Gate: fails on P1.` and the document said `{"threshold":"high","failOnPriority":"P1"}`,
+	// which is the contradiction one field exists to prevent, reintroduced one layer down.
+	out := &gateReport{Disabled: g.Disabled}
+	if g.Policy.GatesOnSeverity() {
+		out.Threshold = string(g.Policy.FailOn)
+	} else {
+		band := g.Policy.PriorityBand()
+		if band == "" {
+			band = norn.DefaultPriority
+		}
+		out.FailOnPriority = band
+	}
+	// Whichever half the gate reads. A per-control threshold in the other vocabulary decides
+	// nothing, so writing it here would be the document claiming a rule fired that did not.
+	applied := map[string]string{}
+	if g.Policy.GatesOnSeverity() {
+		for name, sev := range g.Policy.PerControl {
+			if sev != "" {
+				applied[name] = string(sev)
+			}
+		}
+	} else {
+		for name, band := range g.Policy.PerControlBand {
+			if band != "" {
+				applied[name] = band
+			}
+		}
+	}
+	if len(applied) > 0 {
+		out.PerControl = applied
+	}
+	return out
 }
 
 // DescriptorRef identifies the descriptor a run was produced from.
@@ -126,14 +237,14 @@ type DescriptorRef struct {
 	Digest string `json:"digest,omitempty"`
 	// Sources are the files it was assembled from, root first.
 	Sources []DescriptorSource `json:"sources,omitempty"`
-	// Effective is the merged, environment-substituted descriptor as YAML — the same bytes Digest
-	// is taken over.
+	// Effective is the merged, environment-substituted descriptor as YAML. The same bytes Digest is
+	// taken over.
 	//
 	// Sent because a digest is worth nothing to somebody who cannot reproduce it, and because the
 	// question a reader actually has is "what did this run apply", which no list of filenames
 	// answers. It holds less than the report beside it: the findings, their locations and every
 	// suppression's reason and accepter are already in that, and a descriptor never carries a
-	// credential — the schema has no field for one, only for the name of a variable.
+	// credential. The schema has no field for one, only for the name of a variable.
 	//
 	// A few kilobytes against a report that is already larger.
 	Effective string `json:"effective,omitempty"`
@@ -143,9 +254,9 @@ type DescriptorRef struct {
 type DescriptorSource struct {
 	// Path is the file as the descriptor that named it wrote it.
 	Path string `json:"path,omitempty"`
-	// URL, Revision and Resolved locate a fragment fetched from another repository. Revision is
-	// what was asked for and Resolved is the commit that turned out to be — a branch moves, so
-	// only the second makes the run reproducible.
+	// URL, Revision and Resolved locate a fragment fetched from another repository. Revision is what
+	// was asked for and Resolved is the commit that turned out to be, a branch moves, so only the
+	// second makes the run reproducible.
 	URL      string `json:"url,omitempty"`
 	Revision string `json:"revision,omitempty"`
 	Resolved string `json:"resolved,omitempty"`
@@ -157,7 +268,7 @@ type DescriptorSource struct {
 }
 
 // DescriptorFrom renders a resolution as the report's descriptor block, or nil when there was
-// none — a scan driven entirely from flags has no descriptor to record, and an empty block would
+// none, a scan driven entirely from flags has no descriptor to record, and an empty block would
 // claim otherwise.
 func DescriptorFrom(res *saga.Resolved) *DescriptorRef {
 	if res == nil || len(res.Sources) == 0 {
@@ -187,8 +298,9 @@ type FeedProvenance struct {
 	Stale     bool       `json:"stale,omitempty"`
 }
 
+// releaseInfo is what was assessed. Its version, and nothing else: what a release is called is
+// the project's name, and it is `project` at the top of this document.
 type releaseInfo struct {
-	Name    string `json:"name"`
 	Version string `json:"version"`
 }
 
@@ -204,11 +316,11 @@ type controlReport struct {
 	Total           int    `json:"total"`
 	// ScanErrors are what stopped this control finishing, in the scanner's own words.
 	//
-	// Present is the whole signal; there is no separate flag saying so. A run that failed because
-	// a scanner never started and one that failed on what it found are the same `fail` above, and
-	// they call for different things — the first is a broken pipeline, the second is work. When
-	// this is set the counts describe what the scanners that did run found, which is not the same
-	// as what is there.
+	// Present is the whole signal; there is no separate flag saying so. A run that failed because a
+	// scanner never started and one that failed on what it found are the same `fail` above, and they
+	// call for different things. The first is a broken pipeline, the second is work. When this is set
+	// the counts describe what the scanners that did run found, which is not the same as what is
+	// there.
 	ScanErrors []string `json:"scanErrors,omitempty"`
 }
 
@@ -245,9 +357,9 @@ type statsInfo struct {
 	// concurrently, so the parts add up to more than the whole. The sum is what identifies the
 	// control worth looking at; the wall-clock is what the person waited.
 	//
-	// Omitted rather than zero when the engine did not record them. Zero milliseconds is a claim
-	// that a run took no time, which is never true — unlike `cacheHits: 0`, where zero is a
-	// measurement and belongs in the document.
+	// Omitted rather than zero when the engine did not record them. Zero milliseconds is a claim that
+	// a run took no time, which is never true, unlike `cacheHits: 0`, where zero is a measurement and
+	// belongs in the document.
 	DurationMs  int64            `json:"durationMs,omitempty"`
 	ByControlMs map[string]int64 `json:"byControlMs,omitempty"`
 	ToolWaitsMs map[string]int64 `json:"toolWaitsMs,omitempty"`
@@ -292,25 +404,26 @@ func RenderJSONWith(w io.Writer, release saga.Release, run engine.Result, verdic
 
 // RenderJSONWithFeeds is RenderJSONWith plus the exploitability datasets the run used.
 //
-// Deprecated: use RenderJSONFor, which carries the project. This one emits a document with no
-// project in it, which a platform files under nothing.
+// Deprecated: use RenderJSONFor, which carries the project. This one emits a document naming no
+// project at all, a platform files it under nothing, and there is no longer a release name for one
+// to fall back to.
 func RenderJSONWithFeeds(w io.Writer, release saga.Release, run engine.Result, verdict norn.Result, minPriority string, feeds []FeedProvenance, opts sarif.MarshalOptions) error {
 	return RenderJSONFor(w, "", release, run, verdict, minPriority, feeds, opts, Provenance{})
 }
 
 // RenderJSONFor is RenderJSONWithFeeds with the project the run belongs to.
 //
-// A separate function rather than another parameter on the three above: release.name is being
-// removed, and those signatures go with it. Changing them twice — once to add the project and
-// again to drop the release name — is two breaks for one decision.
+// A separate function rather than another parameter on the three above, which are kept for callers
+// outside this repository and say what they leave out.
 func RenderJSONFor(w io.Writer, project string, release saga.Release, run engine.Result, verdict norn.Result, minPriority string, feeds []FeedProvenance, opts sarif.MarshalOptions, prov Provenance) error {
 	doc := jsonReport{
 		Descriptor: prov.Descriptor,
 		CI:         prov.CI,
 		Project:    project,
-		Release:    releaseInfo{Name: release.Name, Version: release.Version},
+		Release:    releaseInfo{Version: release.Version},
 		Verdict:    string(verdict.Verdict),
 		Scope:      scopeOf(run),
+		Gate:       describeGate(prov.Gate),
 		Stats: statsInfo{
 			Jobs:              run.Stats.Jobs,
 			Scans:             run.Stats.Scans,
@@ -340,9 +453,9 @@ func RenderJSONFor(w io.Writer, project string, release saga.Release, run engine
 		})
 	}
 	// A control that produced nothing at all has no outcome to attach to, so listing only the
-	// outcomes drops it entirely — and a consumer counting controls sees a shorter list rather
-	// than a failure. That is the whole complaint this document exists to answer, so it is
-	// listed with the counts it truly has: none.
+	// outcomes drops it entirely, and a consumer counting controls sees a shorter list rather than a
+	// failure. That is the whole complaint this document exists to answer, so it is listed with the
+	// counts it truly has: none.
 	for _, name := range sortedControls(run.ScanErrors) {
 		if seen[name] {
 			continue
@@ -362,7 +475,7 @@ func RenderJSONFor(w io.Writer, project string, release saga.Release, run engine
 		})
 	}
 
-	doc.Priorities, doc.Findings = summarizePriorities(run, minPriority)
+	doc.Priorities, doc.Suppressed, doc.Findings = summarizePriorities(run, minPriority)
 	doc.Exploitability = feeds
 	doc.Reachability = reachabilityOf(run)
 
@@ -388,8 +501,19 @@ func RenderJSONFor(w io.Writer, project string, release saga.Release, run engine
 // summarizePriorities tallies findings by priority band and, when minPriority is set, builds
 // a ranked list of findings at or above it. Returns nil counts when the run was not
 // prioritized (no finding carries a priority).
-func summarizePriorities(run engine.Result, minPriority string) (*priorityCounts, []findingReport) {
+//
+// Counted over what the gate judges, which is what every other counter in this codebase already
+// does and this one did not. `Counts()` skips a suppressed finding and a second scanner's copy of
+// one already counted, with the reasoning written beside it; `highestPriority` in the gate skips
+// both; this counted everything. So one document could say a project had a P1, that the gate fails
+// on P1, and that the verdict was pass, all three correct and reading as a contradiction.
+//
+// Excused findings are counted apart rather than dropped. An exclusion keeps a finding in the
+// report with the reason somebody gave, and a summary that loses it entirely is the deletion that
+// exclusion exists to avoid, the count just stops being mixed in with the work.
+func summarizePriorities(run engine.Result, minPriority string) (*priorityCounts, *suppressedCounts, []findingReport) {
 	var counts priorityCounts
+	var excused suppressedCounts
 	var findings []findingReport
 	prioritized := false
 	minRank := prioritization.Priority(minPriority).Rank()
@@ -400,15 +524,27 @@ func summarizePriorities(run engine.Result, minPriority string) (*priorityCounts
 				continue
 			}
 			prioritized = true
+			// A second scanner's copy of a flaw already counted. Skipped outright rather than
+			// counted apart: it is not a finding anybody set aside, it is one already in the
+			// number above under the other tool's rule id, and reporting one vulnerability as two
+			// is the arithmetic that makes a backlog look worse than the system is.
+			if res.Correlated() {
+				continue
+			}
+			into := &counts
+			if res.Suppressed() {
+				into = &excused.priorityCounts
+				excused.Total++
+			}
 			switch prioritization.Priority(res.Priority) {
 			case prioritization.P1:
-				counts.P1++
+				into.P1++
 			case prioritization.P2:
-				counts.P2++
+				into.P2++
 			case prioritization.P3:
-				counts.P3++
+				into.P3++
 			case prioritization.P4:
-				counts.P4++
+				into.P4++
 			}
 			if minRank > 0 && prioritization.Priority(res.Priority).Rank() >= minRank {
 				findings = append(findings, toFinding(name, res))
@@ -416,10 +552,13 @@ func summarizePriorities(run engine.Result, minPriority string) (*priorityCounts
 		}
 	}
 	if !prioritized {
-		return nil, nil
+		return nil, nil, nil
 	}
 	sortFindings(findings)
-	return &counts, findings
+	if excused.Total == 0 {
+		return &counts, nil, findings
+	}
+	return &counts, &excused, findings
 }
 
 func toFinding(control string, res sarif.Result) findingReport {
@@ -428,6 +567,7 @@ func toFinding(control string, res sarif.Result) findingReport {
 		loc = fmt.Sprintf("%s:%d", loc, res.Location.StartLine)
 	}
 	return findingReport{
+		Suppressed:   suppressionOf(res),
 		Priority:     res.Priority,
 		Level:        string(res.Level),
 		Score:        res.Score,
@@ -488,10 +628,10 @@ func MergedSARIF(run engine.Result) sarif.Report {
 		reports = append(reports, rep)
 	}
 	merged := sarif.Merge(reports...)
-	// A scoped run stamps what it covered. SARIF carries the results and nothing about what was
-	// not looked at, so without this a scan of one component and a scan of twelve are
-	// indistinguishable to any consumer that reloads the file — and the one that matters,
-	// `draugr diff`, would read every unscanned finding as fixed.
+	// A scoped run stamps what it covered. SARIF carries the results and nothing about what was not
+	// looked at, so without this a scan of one component and a scan of twelve are indistinguishable
+	// to any consumer that reloads the file, and the one that matters, `draugr diff`, would read
+	// every unscanned finding as fixed.
 	if prov, ok := ScopeProvenance(run.Scope); ok {
 		merged.Provenance = append(merged.Provenance, prov)
 	}
@@ -531,7 +671,7 @@ const MinPriorityProvenanceTool = "draugr/min-priority"
 // whether there was one to render.
 //
 // The same carrier and the same reason as a scope: a run states what it left out, not only what it
-// found. And the same hazard if it does not — a narrowed file and a complete one are
+// found. And the same hazard if it does not, a narrowed file and a complete one are
 // indistinguishable to anything that reloads them, so `draugr diff` would read every finding below
 // the band as fixed.
 func MinPriorityProvenance(band string) (sarif.Provenance, bool) {
@@ -589,10 +729,10 @@ func WriteSARIFWith(w io.Writer, run engine.Result, opts sarif.MarshalOptions) e
 
 // WriteSARIFNarrowed writes a SARIF report that says which priority band it was narrowed to.
 //
-// The caller has already dropped the findings below the band; what this adds is the statement
-// that it did. A file that is a subset and does not say so is the failure this whole provenance
-// mechanism exists to prevent — most sharply for `draugr diff`, which would otherwise report
-// every omitted finding as fixed.
+// The caller has already dropped the findings below the band; what this adds is the statement that
+// it did. A file that is a subset and does not say so is the failure this whole provenance
+// mechanism exists to prevent, most sharply for `draugr diff`, which would otherwise report every
+// omitted finding as fixed.
 func WriteSARIFNarrowed(w io.Writer, run engine.Result, band string, opts sarif.MarshalOptions) error {
 	merged := MergedSARIF(run)
 	if prov, ok := MinPriorityProvenance(band); ok {
@@ -667,4 +807,18 @@ func reachabilityOf(run engine.Result) *reachabilityInfo {
 		})
 	}
 	return out
+}
+
+// suppressionOf is the note a suppressed finding carries, or nil.
+//
+// Nil rather than an empty object on a finding nobody excused: a reader scanning the list for what
+// was set aside should find the key only where somebody made a decision.
+func suppressionOf(res sarif.Result) *suppressionNote {
+	if !res.Suppressed() || res.Suppression == nil {
+		return nil
+	}
+	return &suppressionNote{
+		Justification: res.Suppression.Justification,
+		AcceptedBy:    res.Suppression.AcceptedBy,
+	}
 }

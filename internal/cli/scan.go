@@ -48,7 +48,6 @@ type scanOptions struct {
 	cacheTTL           time.Duration
 	cacheReadOnly      bool
 	cacheRequireDigest bool
-	group              string
 	evidence           bool
 	minPriority        string
 	// artifactMinPriority narrows the written artifacts as well, which --min-priority
@@ -60,8 +59,8 @@ type scanOptions struct {
 	epssFile            string
 	epssThreshold       float64
 	// setFlags names the flags the user actually typed. Needed because the descriptor supplies
-	// defaults for the same settings, and a flag with a non-zero default — --epss-threshold is
-	// 0.5 — cannot be told apart from an unset one by its value.
+	// defaults for the same settings, and a flag with a non-zero default. --epss-threshold is
+	// 0.5, cannot be told apart from an unset one by its value.
 	setFlags        map[string]bool
 	jobs            int
 	format          string
@@ -73,22 +72,26 @@ type scanOptions struct {
 	components      []string
 	controls        []string
 	allowScanErrors bool
-	compact         bool
+	view            string
+	// group and compact are the two flags --view replaces, kept so a pipeline written against
+	// them keeps working while it says so.
+	group   string
+	compact bool
 }
 
 // scanFlagGroups is how `draugr scan --help` is organized: a heading per question a reader
 // arrives with, rather than one alphabetical list of thirty-odd flags.
 //
 // Order is deliberate and is not alphabetical either. It runs from what a scan looks at, through
-// what its answer means, to how the answer is delivered — the order the decisions are actually
+// what its answer means, to how the answer is delivered. The order the decisions are actually
 // made in.
 var scanFlagGroups = []flagGroup{
 	{"What is scanned", []string{"components", "controls", "working-tree"}},
 	{"What fails the build", []string{"fail-on", "fail-on-priority", "no-gate", "allow-scan-errors"}},
 	{"Exploitability data", []string{"kev", "epss", "epss-threshold"}},
 	{"Output", []string{
-		"format", "output", "report", "group", "evidence", "top", "min-priority",
-		"artifact-min-priority", "compact", "template", "template-file", "no-tips",
+		"format", "output", "report", "view", "group", "compact", "evidence", "top",
+		"min-priority", "artifact-min-priority", "template", "template-file", "no-tips",
 	}},
 	{"Caching", []string{"cache-dir", "cache-ttl", "cache-read-only", "cache-require-digest"}},
 	{"Running the scan", []string{"jobs", "allow-effects", "no-publish"}},
@@ -102,9 +105,9 @@ func newScanCommand() *cobra.Command {
 		Long: "Load a Saga descriptor, run the applicable security controls, and produce\n" +
 			"pass/fail evidence. Exits non-zero when the policy verdict is fail.\n\n" +
 			"Zero-config: point it at a directory (or omit the argument to use the current\n" +
-			"one) and Draugr scans that repository with " + ZeroConfigControls("and") + " — no\n" +
+			"one) and Draugr scans that repository with " + ZeroConfigControls("and") + ", no\n" +
 			"Saga required. Write a Saga (or run `draugr init`) when you need more control.\n\n" +
-			"Answers you give every time — the cache, scanner builds, how you like the report —\n" +
+			"Answers you give every time, the cache, scanner builds, how you like the report,\n" +
 			"belong in draugr.config.yaml rather than on this command line. `draugr config show`\n" +
 			"prints what is in effect and where each setting came from.",
 		Args: cobra.MaximumNArgs(1),
@@ -119,23 +122,31 @@ func newScanCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&opts.outputDir, "output", "o", "", "directory to write reports into (see --report; default report.json and results.sarif)")
 	cmd.Flags().BoolVar(&opts.workingTree, "working-tree", false,
-		"scan repositories as they are on disk, uncommitted work included — for iterating on a "+
+		"scan repositories as they are on disk, uncommitted work included, for iterating on a "+
 			"fix without committing. The result is not reproducible and the report says so")
 	cmd.Flags().BoolVar(&opts.noGate, "no-gate", false,
-		"report the verdict but exit 0 on a fail — for producing a report to compare later, "+
+		"report the verdict but exit 0 on a fail, for producing a report to compare later, "+
 			"where `draugr diff` is the gate")
-	cmd.Flags().StringVar(&opts.failOn, "fail-on", string(sarif.SeverityHigh),
-		"severity that fails the gate: critical, high, medium, low")
-	cmd.Flags().StringVar(&opts.failOnPriority, "fail-on-priority", "", "also fail the gate on any finding at or above this priority (P1-P4)")
+	cmd.Flags().StringVar(&opts.failOn, "fail-on", "",
+		"what fails the gate: a priority band (P1-P4, the default is P1) or a severity "+
+			"(critical, high, medium, low)")
+	cmd.Flags().StringVar(&opts.failOnPriority, "fail-on-priority", "",
+		"deprecated: write the band in --fail-on, which takes either vocabulary")
+	_ = cmd.Flags().MarkDeprecated("fail-on-priority", "use --fail-on, which takes a band or a severity")
 	cmd.Flags().BoolVar(&opts.evidence, "evidence", false,
 		"also print what stands behind the verdict: tool provenance, what each control measured "+
 			"against, the scanned revision, and what the run cost")
-	cmd.Flags().StringVar(&opts.group, "group", groupNone,
-		"how the fix list is organized: none (one row per finding) or `action` (one row per thing to do)")
+	cmd.Flags().StringVar(&opts.view, "view", string(report.ViewFindings),
+		"what the report shows: `findings` (a row each, with what argued with the band under it), "+
+			"actions (a row per thing to do) or compact (one line each; in json and sarif, no "+
+			"indentation and no rule prose)")
+	cmd.Flags().StringVar(&opts.group, "group", "",
+		"deprecated: --view findings or --view actions")
+	_ = cmd.Flags().MarkDeprecated("group", "use --view, which also covers what --compact did")
 	cmd.Flags().StringVar(&opts.cacheDir, "cache-dir", "", "enable content-hash caching in this directory")
 	cmd.Flags().DurationVar(&opts.cacheTTL, "cache-ttl", 24*time.Hour, "cache entry lifetime (0 = no expiry)")
 	cmd.Flags().BoolVar(&opts.cacheReadOnly, "cache-read-only", false,
-		"read the cache but never write it — for a run whose results should not be trusted by the next one")
+		"read the cache but never write it, for a run whose results should not be trusted by the next one")
 	cmd.Flags().BoolVar(&opts.cacheRequireDigest, "cache-require-digest", false,
 		"do not cache an image identified only by a tag: a tag can be rebuilt, so a hit can be right about the key and wrong about the image")
 	cmd.Flags().StringVar(&opts.minPriority, "min-priority", "", "list findings at or above this priority band (P1-P4)")
@@ -167,8 +178,8 @@ func newScanCommand() *cobra.Command {
 		"run only these controls; the verdict says what it covered")
 	cmd.Flags().BoolVar(&opts.allowScanErrors, "allow-scan-errors", false,
 		"treat a control that couldn't run as a warning rather than a failure (best-effort scanning)")
-	cmd.Flags().BoolVar(&opts.compact, "compact", false,
-		"strip indentation and rule documentation from json/sarif output, for a consumer that acts on the report rather than reads it")
+	cmd.Flags().BoolVar(&opts.compact, "compact", false, "deprecated: --view compact")
+	_ = cmd.Flags().MarkDeprecated("compact", "use --view compact")
 
 	useFlagGroups(cmd, scanFlagGroups)
 
@@ -191,7 +202,7 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		// Names the shape rather than one filename: a reader whose file is called `web.saga.yaml`
 		// would otherwise read "no draugr.saga.yaml here" as a filename mismatch and rename it,
 		// when the real answer is that the file is somewhere else.
-		_, _ = fmt.Fprintf(os.Stderr, "No *.saga.yaml here — scanning %s with controls: "+ZeroConfigControls("")+".\n"+
+		_, _ = fmt.Fprintf(os.Stderr, "No *.saga.yaml here, scanning %s with controls: "+ZeroConfigControls("")+".\n"+
 			"(run `draugr init` to scaffold one you can customize)\n\n", model.Components[0].Repositories[0].URL)
 	}
 	// Organization defaults are merged *underneath* the descriptor, so the engine sees one
@@ -205,7 +216,7 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 	outputOptionsFrom(&opts, cfg.Output)
 
 	// Validated before anything runs, and against this descriptor. A misspelled name matches
-	// nothing, scans nothing, and passes — the "we did not look" verdict the scope is otherwise
+	// nothing, scans nothing, and passes. The "we did not look" verdict the scope is otherwise
 	// careful not to produce, reached by typo.
 	scope := engine.Scope{Components: opts.components, Controls: opts.controls}
 	if err := scope.Validate(*model, controlNames(reg)); err != nil {
@@ -220,23 +231,33 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 	if err != nil {
 		return err
 	}
-	failOnPriority, err := validatePriority("--fail-on-priority", opts.failOnPriority)
+	// Before the scan, not after. A typo discovered once the scanners have finished is a wasted
+	// pipeline minute for a mistake that was visible on the command line.
+	failOn, failOnPriority, err := resolveGate(opts.failOn, opts.failOnPriority, model.Config.Gate)
 	if err != nil {
 		return err
 	}
-	// The flag wins over the descriptor, so a stricter run is possible without editing a file
-	// under review. The descriptor is the standing policy; the flag is this run.
-	if failOnPriority == "" && model.Config.Gate != nil {
-		failOnPriority = model.Config.Gate.FailOnPriority
-	}
-	// Before the scan, not after. A typo discovered once the scanners have finished is a wasted
-	// pipeline minute for a mistake that was visible on the command line.
-	failOn, err := sarif.ParseSeverity(opts.failOn)
-	if err != nil {
-		return fmt.Errorf("--fail-on: %w", err)
+	// Before the scanners run, because the answer does not depend on what they find and a wasted
+	// pipeline is a poor way to learn that the gate was never going to fire.
+	//
+	// Not under --no-gate. Refusing a run because its gate cannot fire, on the flag that exists to
+	// stop the gate deciding anything, is the check arguing with the person who already answered
+	// it. `draugr diff` gating the pair either side of it is the ordinary case.
+	if !opts.noGate {
+		if err := reportUnreachableGate(w, model, failOnPriority); err != nil {
+			return err
+		}
 	}
 	if err := checkWorkingTree(opts.workingTree, model); err != nil {
 		return err
+	}
+	// The same check `validate` runs, here as well, because a run is where it costs something. A
+	// format this build cannot render and a destination with nothing to deliver are both visible
+	// in the descriptor and were both reported once every scanner had finished.
+	if !opts.noPublish {
+		if err := checkReportNames(model); err != nil {
+			return err
+		}
 	}
 	expl, feedProv, err := loadExploitSource(ctx, exploitSettings(opts, model.Config.Exploitability))
 	if err != nil {
@@ -249,7 +270,7 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 	if opts.top < 0 {
 		return fmt.Errorf("--top must be >= 0 (0 = show all)")
 	}
-	if err := validateGroup(opts.group); err != nil {
+	if err := resolveView(&opts); err != nil {
 		return err
 	}
 
@@ -260,6 +281,10 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		// consulted produces evidence nobody can check the ranking against.
 		engine.WithConsulted(expl.Consulted()),
 		engine.WithSBOM(sbomgen.New()),
+		// So a cache entry names the commit it describes rather than a branch that has moved
+		// under it. One `ls-remote` per repository, against the server a clone would use anyway,
+		// and only when caching is on.
+		engine.WithRevisionResolver(git.ResolveRevision),
 		// Name a local checkout by the repository it came from, so a scan here and a scan in a
 		// pipeline recognize each other as one source rather than two.
 		engine.WithRemoteResolver(func(path string) string {
@@ -312,43 +337,44 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		eopts = append(eopts, engine.WithScope(scope))
 	}
 
-	// One checkout per repository for this run, shared by every scanner that asks for the same
-	// one. Owned by the invocation rather than the engine: the lifetime is this run's, and
-	// pkg/engine orchestrates targets in general — it should not learn about git to make
-	// repositories cheaper.
+	// One checkout per repository for this run, shared by every scanner that asks for the same one.
+	// Owned by the invocation rather than the engine: the lifetime is this run's, and pkg/engine
+	// orchestrates targets in general. It should not learn about git to make repositories cheaper.
 	pool := git.NewPool()
 	defer pool.Close()
 	ctx = git.WithPool(ctx, pool)
 
-	// The error is deliberately not logged here. Every failure it joins is also recorded against
-	// a control in run.ScanErrors — a planning failure against a pseudo-control precisely so it
-	// has somewhere to be reported from — so the report prints each one under the control it
-	// belongs to, and the command exits naming the control that could not run. Logging the join
-	// as well puts a third copy of the same sentences on the screen, the longest of them first,
-	// above the report that explains them.
+	// The error is deliberately not logged here. Every failure it joins is also recorded against a
+	// control in run.ScanErrors, a planning failure against a pseudo-control precisely so it has
+	// somewhere to be reported from, so the report prints each one under the control it belongs to,
+	// and the command exits naming the control that could not run. Logging the join as well puts a
+	// third copy of the same sentences on the screen, the longest of them first, above the report
+	// that explains them.
 	run, _ := engine.New(reg, eopts...).Run(ctx, *model)
 
 	// Erased here rather than only on the way out. The deferred call runs when this function
-	// returns, which is after the report has been written — so the line describing a run in
-	// progress stays on the terminal while the report prints over it, and the verdict arrives
-	// welded to a job counter. The run is finished at this point and the line has nothing left
-	// to say; done is idempotent, so the defer remains as the path for an early return.
+	// returns, which is after the report has been written, so the line describing a run in progress
+	// stays on the terminal while the report prints over it, and the verdict arrives welded to a job
+	// counter. The run is finished at this point and the line has nothing left to say; done is
+	// idempotent, so the defer remains as the path for an early return.
 	progress.done()
 
 	reports := make(map[string]sarif.Report, len(run.Controls))
 	for name, cr := range run.Controls {
 		reports[name] = cr.Report
 	}
+	perControl, perControlBand := scanpolicy.GateThresholds(model.Config.Gate)
 	policy := norn.Policy{
 		FailOn:         failOn,
-		PerControl:     scanpolicy.GateThresholds(model.Config.Gate),
+		PerControl:     perControl,
 		FailOnPriority: failOnPriority,
+		PerControlBand: perControlBand,
 	}
 	verdict := policy.Evaluate(reports)
 	components, unattributed := componentVerdicts(policy, model, reports, scope, run.Stats.Unscanned)
-	// A control that couldn't run didn't find nothing — it found out nothing. Reporting that as
-	// a pass makes the gate a false negative exactly when it matters: in CI, where a scanner
-	// failing to provision is the common case and the warning scrolls past unread.
+	// A control that couldn't run didn't find nothing. It found out nothing. Reporting that as a
+	// pass makes the gate a false negative exactly when it matters: in CI, where a scanner failing
+	// to provision is the common case and the warning scrolls past unread.
 	unwaived, waived := splitScanErrors(run.ScanErrors)
 	incomplete := len(unwaived) > 0 || (len(waived) > 0 && !opts.allowScanErrors)
 	if incomplete {
@@ -373,24 +399,31 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		}
 	}
 	data := report.Data{
-		Project:            model.ProjectName(),
-		Release:            model.Release,
-		Run:                run,
-		Verdict:            verdict,
-		MinPriority:        minPriority,
-		TopN:               fixFirstLimit(opts.top),
-		GroupActions:       opts.group == groupAction, // "" is unset, and the default is a finding a row
-		UndeliveredReports: undeliveredReports(model, opts),
-		Evidence:           opts.evidence,
+		Project:     model.ProjectName(),
+		Release:     model.Release,
+		Run:         run,
+		Verdict:     verdict,
+		MinPriority: minPriority,
+		TopN:        fixFirstLimit(opts.top),
+		Evidence:    opts.evidence,
 		// Built from the same policy the verdict came from, so the report cannot describe a gate
 		// the run did not use.
 		Gate: report.GateSettings{
 			Threshold:      policy.FailOn,
 			PerControl:     policy.PerControl,
 			FailOnPriority: policy.FailOnPriority,
+			PerControlBand: policy.PerControlBand,
 			Disabled:       opts.noGate,
 		},
-		Compact:              opts.compact,
+		View:      report.View(opts.view),
+		Uncovered: uncoveredFor(model),
+		Suggestions: scanSuggestions(tipContext{
+			model: model, run: run, verdict: verdict, opts: &opts,
+		}),
+		// With nothing declared, every component is read as public and critical, so the bands rank
+		// severity alone. The report says so beside the counts rather than leaving a reader to
+		// take a ranking as a statement about their application.
+		Unclassified:         !usesRiskClassification(model),
 		Components:           components,
 		Scope:                reportScope(scope),
 		UnattributedFindings: unattributed,
@@ -426,9 +459,6 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		if err := reporter.Render(w, data); err != nil {
 			return err
 		}
-		if format == "console" {
-			printScanTips(w, tipContext{model: model, run: run, verdict: verdict, opts: &opts})
-		}
 	}
 	if opts.outputDir != "" {
 		if err := writeArtifacts(opts.outputDir, opts.reports, data, model.Release, run, verdict, minPriority, declaredBand(opts, model)); err != nil {
@@ -445,16 +475,16 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 	// token when what actually happened is that the build should not ship.
 	var publishErr error
 	if !opts.noPublish {
-		publishErr = publish.Run(ctx, model.Config.Reports, model.Config.Publishers, data)
+		publishErr = publish.Run(ctx, model.Config.Publishers, data)
 	}
 
 	if incomplete {
 		// Distinct from a policy failure: nothing was necessarily found, the scan just didn't
 		// finish. Saying so is the difference between a bug report and a shrug.
 		//
-		// The flag is only offered when it would actually help. Recommending it for a planning
-		// failure sent readers to a green PASS over a scan that had checked nothing — the flag
-		// accepts a scanner that failed, and there was no scanner.
+		// The flag is only offered when it would actually help. Recommending it for a planning failure
+		// sent readers to a green PASS over a scan that had checked nothing, the flag accepts a scanner
+		// that failed, and there was no scanner.
 		if len(unwaived) > 0 {
 			return alsoPublish(fmt.Errorf("scan incomplete: %s could not run. "+
 				"--allow-scan-errors does not apply: it accepts a failed scanner, and no scanner ran",
@@ -466,8 +496,8 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 	}
 	// --no-gate suppresses the *verdict's* exit code only. A scan that could not run still fails,
 	// above: the flag says "I am producing a report to compare later, and the comparison is the
-	// gate" — not "ignore whatever happened". `|| true` in a pipeline cannot tell the two apart,
-	// and swallows the scan error that leaves no report for the diff to read.
+	// gate", not "ignore whatever happened". `|| true` in a pipeline cannot tell the two apart, and
+	// swallows the scan error that leaves no report for the diff to read.
 	if verdict.Verdict == norn.Fail && !opts.noGate {
 		return alsoPublish(fmt.Errorf("policy verdict: fail"), publishErr)
 	}
@@ -487,32 +517,33 @@ func alsoPublish(outcome, publishErr error) error {
 	return fmt.Errorf("%w (publishing also failed: %w)", outcome, publishErr)
 }
 
-// How the fix list is organized.
-const (
-	// groupNone is the default: one row per finding.
-	//
-	// Not because it is the better view — grouping answers "what do I do" and this answers "what
-	// was found" — but because grouping is only right once a descriptor says which images the
-	// team builds and which infrastructure it operates. Without that, an action row states a fix
-	// nobody can apply, where a finding row merely reports something true that a reader can look
-	// up. Stating wrong advice is worse than listing a fact.
-	groupNone = "none"
-	// groupAction gives one row per thing to do, saying how many findings it clears.
-	groupAction = "action"
-)
-
-// validateGroup rejects a value that is not one of the two, rather than quietly choosing.
+// resolveView settles what the report shows, folding in the two flags --view replaces.
 //
-// A mistyped --group that fell through to the default would render a list the reader did not ask
-// for and say nothing about it — a flag that either does something or explains why it did not.
-func validateGroup(v string) error {
-	switch v {
-	// Empty is unset rather than mistyped: a caller building the options directly, or a test,
-	// gets the same default the flag does rather than an error about a flag it never set.
-	case "", groupAction, groupNone:
+// --group and --compact were one question asked twice. Four combinations existed where three
+// answers do, and two of them meant the same thing, so a reader had to work out that
+// "--group action --compact" was a thing at all. Both still work and both say what to write
+// instead; an explicit --view wins over either, because that is the one the caller typed
+// deliberately.
+func resolveView(opts *scanOptions) error {
+	switch {
+	case opts.setFlags["view"]:
+	case opts.compact:
+		opts.view = string(report.ViewCompact)
+	case opts.group == "action":
+		opts.view = string(report.ViewActions)
+	case opts.group == "none":
+		opts.view = string(report.ViewFindings)
+	case opts.group != "":
+		return fmt.Errorf("--group %q is not action or none; --view replaces it", opts.group)
+	}
+	switch report.View(opts.view) {
+	// Empty is unset rather than mistyped: a caller building the options directly, or a test, gets
+	// the same default the flag does rather than an error about a flag it never set.
+	case "", report.ViewFindings, report.ViewActions, report.ViewCompact:
 		return nil
 	default:
-		return fmt.Errorf("--group %q is not %s or %s", v, groupAction, groupNone)
+		return fmt.Errorf("--view %q is not %s, %s or %s", opts.view,
+			report.ViewFindings, report.ViewActions, report.ViewCompact)
 	}
 }
 
@@ -565,16 +596,18 @@ var defaultArtifacts = []string{"json", "sarif"}
 // complete set.
 //
 // The flag wins over the descriptor so a workflow can narrow what it uploads without editing a
-// file it may not own — the same precedence every other scan setting uses. Only a sarif report's
+// file it may not own, the same precedence every other scan setting uses. Only a sarif report's
 // band is consulted, because -o writes one sarif and asking which of several reports it came from
 // has no answer.
 func declaredBand(opts scanOptions, model *saga.Model) string {
 	if opts.artifactMinPriority != "" {
 		return opts.artifactMinPriority
 	}
-	for _, r := range model.Config.Reports {
-		if r.Format == "sarif" && r.MinPriority != "" {
-			return r.MinPriority
+	for _, p := range model.Config.Publishers {
+		for _, r := range p.Reports {
+			if r.Format == "sarif" && r.MinPriority != "" {
+				return r.MinPriority
+			}
 		}
 	}
 	return ""
@@ -607,9 +640,9 @@ func writeArtifacts(dir string, formats []string, data report.Data, release saga
 	for _, format := range formats {
 		name := report.Filename(format)
 		// json and sarif go through skald directly, as they always have. They are written complete
-		// regardless of --min-priority, because a file that claims to be the scan and is not
-		// misleads whatever consumes it — most sharply `draugr diff`, which reads a missing
-		// finding as a fixed one.
+		// regardless of --min-priority, because a file that claims to be the scan and is not misleads
+		// whatever consumes it, most sharply `draugr diff`, which reads a missing finding as a fixed
+		// one.
 		//
 		// `declared` is the exception, and the difference is that it was asked for: a descriptor
 		// that says minPriority on a report, or --artifact-min-priority on the command line. The
@@ -618,7 +651,11 @@ func writeArtifacts(dir string, formats []string, data report.Data, release saga
 		switch format {
 		case "json":
 			if err := writeTo(filepath.Join(dir, name), func(w io.Writer) error {
-				return skald.RenderJSON(w, release, run, verdict, firstNonEmpty(declared, minPriority))
+				// Named, because a document with no project in it is one a platform files under nothing. And
+				// there is no release name left for it to be recovered from.
+				return skald.RenderJSONFor(w, data.ProjectName(), release, run, verdict,
+					firstNonEmpty(declared, minPriority), nil, sarif.MarshalOptions{},
+					skald.Provenance{Gate: data.GateForReport()})
 			}); err != nil {
 				return err
 			}
@@ -682,10 +719,10 @@ func splitScanErrors(scanErrors map[string][]string) (unwaived, waived []string)
 // componentVerdicts judges each component on its own findings, and counts those belonging to
 // none.
 //
-// The same policy, re-run over a partition of the same findings — not a second implementation of
+// The same policy, re-run over a partition of the same findings, not a second implementation of
 // the gate. Reproducing "what counts as failing" in the reporter is how the parts come to
-// disagree with the whole, and the disagreement would surface as a component reading PASS under
-// a headline that says FAIL.
+// disagree with the whole, and the disagreement would surface as a component reading PASS under a
+// headline that says FAIL.
 //
 // Findings with no component come from project-scoped controls (infrastructure). They are
 // counted rather than assigned: a breakdown that quietly omits them makes the parts look like
@@ -792,8 +829,8 @@ func priorityBand(p string) int {
 //
 // A tag is a name, not content. Rebuild and re-push `acme/api:latest` and the cache key is
 // unchanged, so the next scan reports the previous image's findings and is entirely convinced.
-// Every other target Draugr scans is content-addressed already — a commit, a digest, a normalized
-// endpoint — which is why this is the one exception worth being able to switch off.
+// Every other target Draugr scans is content-addressed already, a commit, a digest, a normalized
+// endpoint. Which is why this is the one exception worth being able to switch off.
 //
 // Off by default: the reader who pins digests loses nothing, and refusing to cache tags outright
 // would punish the common case to prevent an uncommon one. Turning it on is for a pipeline that
@@ -808,9 +845,9 @@ func digestPinnedOnly(t plugin.Target) bool {
 
 // applyConfigDefaults merges the machine/organization controller defaults under the descriptor.
 //
-// Under, not over: a project that has an opinion keeps it, and inherits the rest. The alternative
-// — defaults that a Saga cannot override — is a guarantee a CLI cannot keep, because the config
-// lives on a machine the same person controls.
+// Under, not over: a project that has an opinion keeps it, and inherits the rest. The
+// alternative, defaults that a Saga cannot override. Is a guarantee a CLI cannot keep, because
+// the config lives on a machine the same person controls.
 func applyConfigDefaults(ctx context.Context, model *saga.Model) (config.File, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -833,11 +870,11 @@ func applyConfigDefaults(ctx context.Context, model *saga.Model) (config.File, e
 	if len(res.File.Controllers) == 0 {
 		return res.File, nil
 	}
-	if model.Config.Controllers == nil {
-		model.Config.Controllers = map[string]saga.ControllerSettings{}
+	if model.Config.Controls == nil {
+		model.Config.Controls = map[string]saga.ControllerSettings{}
 	}
 	for control, defaults := range res.File.Controllers {
-		model.Config.Controllers[control] = config.DeepMerge(defaults, model.Config.Controllers[control])
+		model.Config.Controls[control] = config.DeepMerge(defaults, model.Config.Controls[control])
 	}
 	// Said once, at debug: a reader wondering why a control behaved unexpectedly needs to know a
 	// second file had a say, and `draugr config show` is where the detail lives.
@@ -853,8 +890,8 @@ func applyConfigDefaults(ctx context.Context, model *saga.Model) (config.File, e
 // (show everything, deliberately) would read as absent and a configured cap would override an
 // explicit instruction.
 func outputOptionsFrom(opts *scanOptions, cfg config.OutputSettings) {
-	if cfg.Group != "" && !opts.setFlags["group"] {
-		opts.group = cfg.Group
+	if cfg.View != "" && !opts.setFlags["view"] {
+		opts.view = cfg.View
 	}
 	if cfg.Evidence && !opts.setFlags["evidence"] {
 		opts.evidence = true
@@ -867,7 +904,7 @@ func outputOptionsFrom(opts *scanOptions, cfg config.OutputSettings) {
 // cacheOptionsFrom folds the configured cache settings under the flags.
 //
 // A typed flag cannot distinguish "not passed" from "passed its zero value", so the check is
-// whether it was *typed* — otherwise `--cache-ttl 0` (no expiry, deliberately) would read as
+// whether it was *typed*, otherwise `--cache-ttl 0` (no expiry, deliberately) would read as
 // absent and the configured value would override an explicit instruction.
 func cacheOptionsFrom(opts *scanOptions, cfg config.CacheSettings) {
 	if cfg.Dir != "" && !opts.setFlags["cache-dir"] {
@@ -893,14 +930,14 @@ func cacheOptionsFrom(opts *scanOptions, cfg config.CacheSettings) {
 // ran has no bearing on how these findings were produced, and listing it would pad the evidence
 // with tools that did nothing.
 //
-// Native scanners are skipped — their rules ship in this binary, so "which build" is answered by
+// Native scanners are skipped, their rules ship in this binary, so "which build" is answered by
 // Draugr's own version, which the report already stamps.
 func toolBuilds(ctx context.Context, run engine.Result) []report.ToolBuild {
 	binaries := map[string]bool{}
 	for _, name := range run.Scanners {
-		// The registry is the only thing that maps a scanner to its executable. A finding's Tool
-		// is the SARIF driver name the tool gives itself — "Trivy" for trivy-fs — so matching on
-		// it finds nothing, which is exactly what the first version of this did.
+		// The registry is the only thing that maps a scanner to its executable. A finding's Tool is the
+		// SARIF driver name the tool gives itself, "Trivy" for trivy-fs, so matching on it finds
+		// nothing, which is exactly what the first version of this did.
 		if sc, ok := builtins.Registry().Scanner(name); ok {
 			if b := sc.Info().Binary; b != "" {
 				binaries[b] = true
@@ -920,12 +957,12 @@ func toolBuilds(ctx context.Context, run engine.Result) []report.ToolBuild {
 	out := make([]report.ToolBuild, 0, len(names))
 	for _, b := range names {
 		a := tools.AttestFound(b, "")
-		// The version of a tool Draugr installed comes from its install record. A tool the
-		// operator brought has no record, so it had none — and that is the one this section
-		// exists for. The whole reason a scan runs whatever is on PATH rather than refusing it is
-		// that the report can still say which build produced the findings; without a version it
-		// says only that Draugr did not install it, which is a fact about Draugr rather than
-		// about the run, and cannot be reproduced from.
+		// The version of a tool Draugr installed comes from its install record. A tool the operator
+		// brought has no record, so it had none. And that is the one this section exists for. The whole
+		// reason a scan runs whatever is on PATH rather than refusing it is that the report can still
+		// say which build produced the findings; without a version it says only that Draugr did not
+		// install it, which is a fact about Draugr rather than about the run, and cannot be reproduced
+		// from.
 		if a.Version == "" {
 			a.Version = probeVersion(ctx, b)
 		}
@@ -940,7 +977,7 @@ func toolBuilds(ctx context.Context, run engine.Result) []report.ToolBuild {
 // probeVersion asks a tool on PATH what version it is, or returns "" if it will not say.
 //
 // Best-effort and bounded: this runs after a scan has finished, to describe what produced it, and
-// a tool that hangs on `--version` must not hold the report. Nothing here fails the run — a
+// a tool that hangs on `--version` must not hold the report. Nothing here fails the run. A
 // missing version is the state this improves on, not a regression to guard against.
 func probeVersion(ctx context.Context, binary string) string {
 	t, ok := tools.Catalog()[binary]
@@ -962,7 +999,7 @@ const versionProbeTimeout = 2 * time.Second
 // checkWorkingTree refuses --working-tree for a descriptor Draugr cannot honor it for.
 //
 // A remote repository has no working tree. Falling back to the committed revision would produce a
-// report that looks like the one asked for and describes something else — and the whole reason to
+// report that looks like the one asked for and describes something else, and the whole reason to
 // ask is that you want to see work that is not committed yet.
 func checkWorkingTree(enabled bool, model *saga.Model) error {
 	if !enabled || model == nil {
@@ -1003,7 +1040,7 @@ func reportScope(scope engine.Scope) *report.Scope {
 // declaredTargets counts what a component's descriptor gave it, by target kind.
 //
 // The denominator for what went unscanned. Taken from the descriptor rather than from the jobs,
-// because a target no scanner was planned for produced no job at all — and it is still something
+// because a target no scanner was planned for produced no job at all. And it is still something
 // the component has that nothing looked at.
 func declaredTargets(c saga.Component) map[string]int {
 	counts := map[string]int{}
@@ -1022,23 +1059,6 @@ func declaredTargets(c saga.Component) map[string]int {
 
 // undeliveredReports names the formats a descriptor declared that this run cannot write.
 //
-// Declared reports are rendered for publishers to deliver. With no publisher and no -o there is
-// nowhere for them to go, and the run says nothing — which reads exactly like a run that wrote
-// them. Not an error, because a descriptor written for a pipeline with publishers is reasonable
-// to run locally without one.
-func undeliveredReports(model *saga.Model, opts scanOptions) []string {
-	if model == nil || len(model.Config.Reports) == 0 {
-		return nil
-	}
-	if len(model.Config.Publishers) > 0 || opts.outputDir != "" {
-		return nil
-	}
-	formats := make([]string, 0, len(model.Config.Reports))
-	for _, r := range model.Config.Reports {
-		formats = append(formats, r.Format)
-	}
-	return formats
-}
 
 // detectedCI is the CI job this scan is running in, or nil.
 //

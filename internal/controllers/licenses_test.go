@@ -50,14 +50,14 @@ func TestLicensesPlanNilComponent(t *testing.T) {
 }
 
 func TestLicensePolicyUnionsRatherThanOverrides(t *testing.T) {
-	// The one place this control departs from how every other controller merges settings.
-	// deepMerge replaces a list outright, so a component adding one denied license would
-	// silently discard the organization's — a component quietly opting out of an org license
-	// policy, invisible in review. A component can only tighten.
-	model := saga.Model{Config: saga.Config{Controllers: map[string]saga.ControllerSettings{
+	// The one place this control departs from how every other controller merges settings. deepMerge
+	// replaces a list outright, so a component adding one denied license would silently discard the
+	// organization's, a component quietly opting out of an org license policy, invisible in review. A
+	// component can only tighten.
+	model := saga.Model{Config: saga.Config{Controls: map[string]saga.ControllerSettings{
 		"licenses": {"deny": []any{"GPL-3.0-only", "AGPL-3.0-only"}},
 	}}}
-	comp := &saga.Component{Name: "c", Controllers: map[string]saga.ControllerSettings{
+	comp := &saga.Component{Name: "c", Controls: map[string]saga.ControllerSettings{
 		"licenses": {"deny": []any{"Sleepycat"}},
 	}}
 	cfg := licensePolicy(model, comp)
@@ -68,12 +68,12 @@ func TestLicensePolicyUnionsRatherThanOverrides(t *testing.T) {
 }
 
 func TestLicensePolicyDeduplicatesAndSorts(t *testing.T) {
-	// Sorted and deduplicated so the job's config — and therefore its cache key — is stable
-	// across runs regardless of how the Saga was written.
-	model := saga.Model{Config: saga.Config{Controllers: map[string]saga.ControllerSettings{
+	// Sorted and deduplicated so the job's config, and therefore its cache key. Is stable across runs
+	// regardless of how the Saga was written.
+	model := saga.Model{Config: saga.Config{Controls: map[string]saga.ControllerSettings{
 		"licenses": {"warn": []any{"MPL-2.0", "EPL-2.0"}},
 	}}}
-	comp := &saga.Component{Controllers: map[string]saga.ControllerSettings{
+	comp := &saga.Component{Controls: map[string]saga.ControllerSettings{
 		"licenses": {"warn": []any{"MPL-2.0"}},
 	}}
 	warn, _ := licensePolicy(model, comp)["warn"].([]string)
@@ -90,7 +90,7 @@ func TestLicensePolicyEmptyIsNil(t *testing.T) {
 }
 
 func TestLicensePolicyComponentOnly(t *testing.T) {
-	comp := &saga.Component{Controllers: map[string]saga.ControllerSettings{
+	comp := &saga.Component{Controls: map[string]saga.ControllerSettings{
 		"licenses": {"deny": []any{"GPL-2.0-only"}},
 	}}
 	deny, _ := licensePolicy(saga.Model{}, comp)["deny"].([]string)
@@ -124,5 +124,131 @@ func TestLicensesAggregateEmpty(t *testing.T) {
 	}
 	if got.Summary != (plugin.Summary{}) {
 		t.Errorf("summary = %+v, want zero", got.Summary)
+	}
+}
+
+// A repository somebody else publishes reaches the scanner saying so.
+//
+// Through the licenses controller because it is the control the case was reported against: a
+// denied license in the dependency tree of a repository this team does not publish is not a
+// license they chose and not one they can swap out, and a report telling them to change the code
+// is telling them to do something impossible.
+//
+// Two repositories, one declared on the component and one overriding it, because a single
+// repository cannot tell a resolved value from a hardcoded one.
+func TestALicenseFindingInSomebodyElsesRepositoryIsMarkedUpstream(t *testing.T) {
+	comp := &saga.Component{
+		Name:    "analytics-console",
+		BuiltBy: saga.BuiltByUpstream,
+		Repositories: []saga.Repository{
+			{URL: "https://github.com/vendor/console.git"},
+			{URL: "https://github.com/acme/console-config.git", BuiltBy: saga.BuiltBySelf},
+		},
+	}
+	model := saga.Model{Config: saga.Config{
+		Controls: map[string]saga.ControllerSettings{"licenses": {"enabled": true}},
+	}}
+
+	jobs, err := Licenses{}.Plan(model, comp)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("planned %d jobs, want one per repository", len(jobs))
+	}
+
+	want := map[string]bool{
+		"https://github.com/vendor/console.git":      true,
+		"https://github.com/acme/console-config.git": false,
+	}
+	for _, job := range jobs {
+		target, ok := job.Target.(plugin.RepositoryTarget)
+		if !ok {
+			t.Fatalf("target is %T, want a repository", job.Target)
+		}
+		if target.Upstream != want[target.URL] {
+			t.Errorf("%s: upstream = %v, want %v, the component declares upstream and the "+
+				"second repository overrides it", target.URL, target.Upstream, want[target.URL])
+		}
+	}
+}
+
+// A component's images are scanned for licenses too.
+//
+// Two repositories and two images, per the rule that one of anything proves the loop runs and two
+// prove it does not collapse, and because a component holding both is the case this exists for: a
+// license obligation inside an image was invisible while this planned repositories only.
+func TestLicensesPlansImagesAsWellAsRepositories(t *testing.T) {
+	comp := &saga.Component{
+		Name: "analytics",
+		Repositories: []saga.Repository{
+			{URL: "https://github.com/acme/console.git"},
+			{URL: "https://github.com/acme/console-shared.git"},
+		},
+		Images: []saga.Image{
+			{Image: "ghcr.io/acme/console:4.2"},
+			{Image: "docker.io/library/alpine:3.19", BuiltBy: saga.BuiltByUpstream},
+		},
+	}
+	model := saga.Model{Config: saga.Config{
+		Controls: map[string]saga.ControllerSettings{
+			"licenses": {"enabled": true, "deny": []any{"AGPL-3.0-only"}},
+		},
+	}}
+
+	jobs, err := Licenses{}.Plan(model, comp)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(jobs) != 4 {
+		t.Fatalf("planned %d jobs, want one per repository and one per image", len(jobs))
+	}
+
+	var repos, images []string
+	for _, job := range jobs {
+		// The same policy reaches every job. Which licenses a release may carry is a decision
+		// about the release, not about where the code happens to sit.
+		deny, _ := job.Config["deny"].([]string)
+		if len(deny) != 1 || deny[0] != "AGPL-3.0-only" {
+			t.Errorf("job carries deny=%v, want the component's policy", job.Config["deny"])
+		}
+		switch target := job.Target.(type) {
+		case plugin.RepositoryTarget:
+			repos = append(repos, target.URL)
+		case plugin.ImageTarget:
+			images = append(images, target.Ref)
+			// Who publishes it travels with the image, so a license in one somebody else builds
+			// is not reported as something to change here.
+			if want := target.Ref == "docker.io/library/alpine:3.19"; target.Upstream != want {
+				t.Errorf("%s: upstream = %v, want %v", target.Ref, target.Upstream, want)
+			}
+		default:
+			t.Errorf("unexpected target %T", job.Target)
+		}
+	}
+	if len(repos) != 2 || len(images) != 2 {
+		t.Errorf("planned %d repositories and %d images, want two of each", len(repos), len(images))
+	}
+}
+
+// A component with images and no repositories still gets scanned. It is the ordinary shape for
+// something a team runs and does not build, and it is exactly where the source tree is unavailable
+// to answer the license question by hand.
+func TestLicensesScansAComponentThatOnlyRunsImages(t *testing.T) {
+	jobs, err := Licenses{}.Plan(
+		saga.Model{Config: saga.Config{
+			Controls: map[string]saga.ControllerSettings{"licenses": {"enabled": true}},
+		}},
+		&saga.Component{Name: "vendor-console", BuiltBy: saga.BuiltByUpstream,
+			Images: []saga.Image{{Image: "ghcr.io/vendor/console:4.2"}}})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("planned %d jobs, want one for the image", len(jobs))
+	}
+	target, ok := jobs[0].Target.(plugin.ImageTarget)
+	if !ok || !target.Upstream {
+		t.Errorf("target = %+v, want the image marked as somebody else's", jobs[0].Target)
 	}
 }

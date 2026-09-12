@@ -42,16 +42,16 @@ func TestLoadSagaInvalidHasContextAndHint(t *testing.T) {
 }
 
 // The zero-config control list appears in the scan help and the run notice. Both must render it
-// from syntheticSaga's actual set — hard-coded copies drifted from reality twice before.
+// from syntheticSaga's actual set, hard-coded copies drifted from reality twice before.
 func TestZeroConfigControlsMatchSyntheticSaga(t *testing.T) {
 	model := syntheticSaga(t.TempDir())
-	for name := range model.Config.Controllers {
+	for name := range model.Config.Controls {
 		if !strings.Contains(ZeroConfigControls("and"), name) {
 			t.Errorf("control %q is enabled zero-config but missing from the rendered list %q",
 				name, ZeroConfigControls("and"))
 		}
 	}
-	if got := len(model.Config.Controllers); got != len(zeroConfigControls) {
+	if got := len(model.Config.Controls); got != len(zeroConfigControls) {
 		t.Errorf("synthesized saga enables %d controls, the list names %d", got, len(zeroConfigControls))
 	}
 	// The help text uses the "and" form; the run notice uses the plain list.
@@ -75,7 +75,7 @@ func writeDescriptors(t *testing.T, names ...string) string {
 	t.Helper()
 	dir := t.TempDir()
 	for i, name := range names {
-		body := fmt.Sprintf("release:\n  name: app-%d\n  version: \"1.0\"\ncomponents:\n  - name: c\n", i)
+		body := fmt.Sprintf("project: app-%d\nrelease:\n  version: \"1.0\"\ncomponents:\n  - name: c\n", i)
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -94,10 +94,10 @@ func TestScanModelFindsAnyNamedDescriptor(t *testing.T) {
 				t.Fatalf("scanModel: %v", err)
 			}
 			if synthesized {
-				t.Errorf("%s was ignored — the scan fell back to zero-config", name)
+				t.Errorf("%s was ignored, the scan fell back to zero-config", name)
 			}
-			if m.Release.Name != "app-0" {
-				t.Errorf("loaded the wrong file: %q", m.Release.Name)
+			if m.Project != "app-0" {
+				t.Errorf("loaded the wrong file: %q", m.Project)
 			}
 		})
 	}
@@ -136,7 +136,7 @@ func TestScanModelUsesAnInteractiveChoice(t *testing.T) {
 	if err != nil || synthesized {
 		t.Fatalf("scanModel: err=%v synthesized=%v", err, synthesized)
 	}
-	if m.Release.Name == "" {
+	if m.Project == "" {
 		t.Error("the chosen descriptor should have been loaded")
 	}
 }
@@ -152,7 +152,7 @@ func TestScanModelStillFallsBackWithNoDescriptor(t *testing.T) {
 }
 
 // `draugr scan` with no argument at all, which is the shortest way to run one. The synthesized
-// Saga has to describe the current directory, not an empty path — the repository it names is what
+// Saga has to describe the current directory, not an empty path. The repository it names is what
 // every scanner is then pointed at.
 func TestScanModelWithNoTargetSynthesizesForHere(t *testing.T) {
 	t.Chdir(t.TempDir())

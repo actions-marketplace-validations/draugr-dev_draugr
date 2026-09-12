@@ -48,7 +48,7 @@ func prioritizedRun() engine.Result {
 
 func TestRenderJSONPriorityCounts(t *testing.T) {
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "a", Version: "1"}, prioritizedRun(), sampleVerdict(), ""); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, prioritizedRun(), sampleVerdict(), ""); err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
@@ -68,7 +68,7 @@ func TestRenderJSONPriorityCounts(t *testing.T) {
 
 func TestRenderJSONMinPriorityFilterAndOrder(t *testing.T) {
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "a", Version: "1"}, prioritizedRun(), sampleVerdict(), "P2"); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, prioritizedRun(), sampleVerdict(), "P2"); err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
@@ -93,7 +93,7 @@ func TestRenderJSONMinPriorityFilterAndOrder(t *testing.T) {
 
 func TestRenderJSONNoPriorityWhenUnprioritized(t *testing.T) {
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "a", Version: "1"}, sampleRun(), sampleVerdict(), "P1"); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, sampleRun(), sampleVerdict(), "P1"); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(buf.String(), "\"priorities\"") {
@@ -128,7 +128,7 @@ func TestSummarizePrioritiesCountsP4(t *testing.T) {
 			{RuleID: "x", Level: sarif.LevelNote, Priority: "P4"},
 		}}},
 	}}
-	counts, _ := summarizePriorities(run, "")
+	counts, _, _ := summarizePriorities(run, "")
 	if counts == nil || counts.P4 != 1 {
 		t.Fatalf("P4 count = %+v", counts)
 	}
@@ -159,7 +159,7 @@ func sampleVerdict() norn.Result {
 
 func TestRenderJSON(t *testing.T) {
 	var buf bytes.Buffer
-	err := RenderJSON(&buf, saga.Release{Name: "app", Version: "1.0"}, sampleRun(), sampleVerdict(), "")
+	err := RenderJSON(&buf, saga.Release{Version: "1.0"}, sampleRun(), sampleVerdict(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestRenderJSONStats(t *testing.T) {
 	run := sampleRun()
 	run.Stats = engine.Stats{Jobs: 12, Scans: 9, CacheHits: 2, Deduped: 1, Concurrency: 4}
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "app", Version: "1.0"}, run, sampleVerdict(), ""); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1.0"}, run, sampleVerdict(), ""); err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
@@ -212,7 +212,7 @@ func TestRenderJSONReportsWhereTheTimeWent(t *testing.T) {
 		ToolWaits: map[string]time.Duration{"trivy": 51 * time.Second},
 	}
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "app", Version: "1.0"}, run, sampleVerdict(), ""); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1.0"}, run, sampleVerdict(), ""); err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
@@ -254,7 +254,7 @@ func TestASubMillisecondControlIsRoundedRatherThanZeroed(t *testing.T) {
 		ByControl: map[string]time.Duration{"secrets": 600 * time.Microsecond},
 	}
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "app", Version: "1.0"}, run, sampleVerdict(), ""); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1.0"}, run, sampleVerdict(), ""); err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
@@ -281,7 +281,7 @@ func TestUnrecordedTimingsAreAbsentRatherThanZero(t *testing.T) {
 	run := sampleRun()
 	run.Stats = engine.Stats{Jobs: 2, Scans: 2, Concurrency: 2}
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "app", Version: "1.0"}, run, sampleVerdict(), ""); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1.0"}, run, sampleVerdict(), ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"durationMs", "byControlMs", "toolWaitsMs"} {
@@ -349,8 +349,8 @@ func TestScopeProvenanceAndBack(t *testing.T) {
 }
 
 func TestScopeProvenanceSaysNothingForAnUnscopedRun(t *testing.T) {
-	// Nearly every run. Stamping an empty scope would make the marker meaningless — every
-	// report would carry one, and a consumer could no longer tell by its presence.
+	// Nearly every run. Stamping an empty scope would make the marker meaningless. Every report
+	// would carry one, and a consumer could no longer tell by its presence.
 	if _, ok := ScopeProvenance(engine.Scope{}); ok {
 		t.Error("an unscoped run stamps nothing")
 	}
@@ -360,8 +360,8 @@ func TestScopeProvenanceSaysNothingForAnUnscopedRun(t *testing.T) {
 }
 
 func TestScopeOfReportIgnoresOtherToolsProvenance(t *testing.T) {
-	// Scanners write provenance too — a benchmark, a coverage figure. Reading one of those as a
-	// scope would make an ordinary report look partial.
+	// Scanners write provenance too, a benchmark, a coverage figure. Reading one of those as a scope
+	// would make an ordinary report look partial.
 	rep := sarif.Report{Provenance: []sarif.Provenance{
 		{Tool: "kube-bench", Fields: []sarif.Field{{Key: "benchmark", Value: "cis-1.9"}}},
 	}}
@@ -392,7 +392,7 @@ func TestJSONReportCarriesTheScope(t *testing.T) {
 	run := engine.Result{Scope: engine.Scope{
 		Components: []string{"app"}, SkippedComponents: []string{"frontend"},
 	}}
-	if err := RenderJSON(&b, saga.Release{Name: "r", Version: "1"}, run, norn.Result{Verdict: norn.Pass}, ""); err != nil {
+	if err := RenderJSON(&b, saga.Release{Version: "1"}, run, norn.Result{Verdict: norn.Pass}, ""); err != nil {
 		t.Fatal(err)
 	}
 	var doc struct {
@@ -416,7 +416,7 @@ func TestJSONReportCarriesTheScope(t *testing.T) {
 
 	// And an unscoped run has no such field, so the presence of one is what carries the meaning.
 	b.Reset()
-	if err := RenderJSON(&b, saga.Release{Name: "r", Version: "1"}, engine.Result{}, norn.Result{Verdict: norn.Pass}, ""); err != nil {
+	if err := RenderJSON(&b, saga.Release{Version: "1"}, engine.Result{}, norn.Result{Verdict: norn.Pass}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(b.String(), `"scope"`) {
@@ -447,7 +447,7 @@ func TestJSONNamesAControlThatCouldNotRun(t *testing.T) {
 	}}
 
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "app", Version: "1"}, run, verdict, ""); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, run, verdict, ""); err != nil {
 		t.Fatalf("RenderJSON: %v", err)
 	}
 	var doc struct {
@@ -494,7 +494,7 @@ func TestJSONOmitsTheCaveatsWhenThereAreNone(t *testing.T) {
 	verdict := norn.Result{Verdict: norn.Pass, Controls: []norn.ControlOutcome{
 		{Control: "sca", Verdict: norn.Pass},
 	}}
-	if err := RenderJSON(&buf, saga.Release{Name: "app", Version: "1"}, run, verdict, ""); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, run, verdict, ""); err != nil {
 		t.Fatalf("RenderJSON: %v", err)
 	}
 	for _, absent := range []string{"scanErrors", "notMeasured"} {
@@ -517,7 +517,7 @@ func TestJSONCarriesWhatWasNotMeasured(t *testing.T) {
 		{Control: "infrastructure", Verdict: norn.Pass},
 	}}
 	var buf bytes.Buffer
-	if err := RenderJSON(&buf, saga.Release{Name: "app", Version: "1"}, run, verdict, ""); err != nil {
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, run, verdict, ""); err != nil {
 		t.Fatalf("RenderJSON: %v", err)
 	}
 	var doc struct {
@@ -549,7 +549,7 @@ func TestJSONCarriesWhatWasNotMeasured(t *testing.T) {
 // A narrowed report says so, and a reader can get the band back out.
 //
 // The round trip is the point. A file that is a subset and does not declare it is
-// indistinguishable from a complete one — and `draugr diff`, reading it as the base, would report
+// indistinguishable from a complete one, and `draugr diff`, reading it as the base, would report
 // every finding below the band as fixed.
 func TestMinPriorityProvenanceRoundTrips(t *testing.T) {
 	prov, ok := MinPriorityProvenance("P2")
@@ -599,8 +599,8 @@ func TestEveryMergedFindingSaysWhichControlFoundIt(t *testing.T) {
 }
 
 func TestAControlSurvivesTheFile(t *testing.T) {
-	// A report is written and read back — by `draugr diff`, by a platform, by anything consuming
-	// the artifact. A field that only exists in memory is one every one of those does without.
+	// A report is written and read back, by `draugr diff`, by a platform, by anything consuming the
+	// artifact. A field that only exists in memory is one every one of those does without.
 	run := engine.Result{Controls: map[string]plugin.ControlResult{
 		"secrets": {Report: sarif.Report{Results: []sarif.Result{
 			{RuleID: "gitleaks.aws-key", Tool: "gitleaks", Message: "a key"},
@@ -642,5 +642,191 @@ func TestMergedSARIFCarriesWhatTheRunConsulted(t *testing.T) {
 	run.Consulted = nil
 	if got := MergedSARIF(run).Consulted; len(got) != 0 {
 		t.Errorf("a run with no exploitability data reported %+v", got)
+	}
+}
+
+// A verdict with no rule beside it is an outcome nobody can check. These cover the three things a
+// consumer has to be able to tell apart: a gate that was stated, a gate that was left to the
+// default, and a document written by a caller that never had one.
+
+func TestTheDocumentStatesTheGateItWasJudgedAgainst(t *testing.T) {
+	var buf bytes.Buffer
+	// A severity gate, refined per control. One question, so no band beside it.
+	gate := &Gate{Policy: norn.Policy{
+		FailOn:     sarif.SeverityMedium,
+		PerControl: map[string]sarif.Severity{"licenses": sarif.SeverityCritical, "sast": ""},
+	}}
+	err := RenderJSONFor(&buf, "gate-demo", saga.Release{Version: "1"}, prioritizedRun(),
+		sampleVerdict(), "", nil, sarif.MarshalOptions{}, Provenance{Gate: gate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Gate *gateReport `json:"gate"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Gate == nil {
+		t.Fatal("no gate block")
+	}
+	if doc.Gate.Threshold != "medium" {
+		t.Errorf("gate = %+v", doc.Gate)
+	}
+	if doc.Gate.Disabled {
+		t.Error("gate reported as disabled when it decided the exit code")
+	}
+	// An override set to nothing is not an override. Emitting it would name a control as exempt
+	// and then not say from what.
+	if want := map[string]string{"licenses": "critical"}; !reflect.DeepEqual(doc.Gate.PerControl, want) {
+		t.Errorf("perControl = %v, want %v", doc.Gate.PerControl, want)
+	}
+}
+
+func TestTheDefaultGateIsWrittenOutRatherThanLeftBlank(t *testing.T) {
+	// Nothing named is the default, which is the band. Written out rather than left blank,
+	// because nothing downstream can look up what our default happens to be, and written as the
+	// band it is rather than as a severity threshold nobody chose.
+	got := describeGate(&Gate{Disabled: true})
+	if got.FailOnPriority != norn.DefaultPriority {
+		t.Errorf("failOnPriority = %q, want the default written out", got.FailOnPriority)
+	}
+	if got.Threshold != "" {
+		t.Errorf("threshold = %q: this run does not gate on severity", got.Threshold)
+	}
+	if !got.Disabled {
+		t.Error("--no-gate not recorded, so a fail that stopped nothing reads as one that did")
+	}
+	if got.PerControl != nil {
+		t.Errorf("perControl = %v, want nothing rather than an empty object", got.PerControl)
+	}
+}
+
+func TestAGateNobodyStatedIsAbsentRatherThanDefaulted(t *testing.T) {
+	if got := describeGate(nil); got != nil {
+		t.Errorf("describeGate(nil) = %+v, want nil", got)
+	}
+	var buf bytes.Buffer
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, sampleRun(), sampleVerdict(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte(`"gate"`)) {
+		t.Error("a caller that never had the policy emitted one, which reads as the default gate")
+	}
+}
+
+// The priority counts are what the gate judged. Every other counter here already worked that way,
+// `Counts()` and the gate's own `highestPriority` both skip a suppressed finding and a second
+// scanner's copy of one already counted, and this one counted everything, so the console and
+// report.json gave different numbers for one run.
+
+func TestPrioritiesCountWhatTheGateJudges(t *testing.T) {
+	run := engine.Result{Controls: map[string]plugin.ControlResult{
+		"sca": {Control: "sca", Report: sarif.Report{Results: []sarif.Result{
+			{RuleID: "CVE-1", Level: sarif.LevelError, Priority: "P1"},
+			// Excused. Still in the report with its reason, and not work.
+			{RuleID: "CVE-2", Level: sarif.LevelError, Priority: "P1", Suppression: &sarif.Suppression{
+				Kind: "external", Justification: "a documentation example", AcceptedBy: "someone@example.test",
+			}},
+			// The other matcher's copy of CVE-1. Not work either, and not a suppression: it is
+			// already in the number above under the first tool's rule id.
+			{RuleID: "CVE-1-grype", Level: sarif.LevelError, Priority: "P1",
+				Correlation: &sarif.Correlation{CountedUnder: "CVE-1"}},
+		}}},
+	}}
+	counts, excused, _ := summarizePriorities(run, "")
+	if counts == nil || counts.P1 != 1 {
+		t.Fatalf("counts = %+v, want one P1: the work is one flaw", counts)
+	}
+	if excused == nil || excused.Total != 1 || excused.P1 != 1 {
+		t.Fatalf("suppressed = %+v, want the excused one counted apart", excused)
+	}
+}
+
+func TestNothingExcusedMeansNoSuppressedBlock(t *testing.T) {
+	// Absent rather than a block of zeroes, so a document carrying one is a run where somebody
+	// made a decision rather than one reporting that they did not.
+	_, excused, _ := summarizePriorities(prioritizedRun(), "")
+	if excused != nil {
+		t.Errorf("suppressed = %+v, want nothing", excused)
+	}
+	var buf bytes.Buffer
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, prioritizedRun(), sampleVerdict(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte(`"suppressed"`)) {
+		t.Error("a run with nothing excused emitted a suppressed block")
+	}
+}
+
+func TestAnExcusedFindingStaysInTheListAndSaysWhy(t *testing.T) {
+	// Suppress, don't delete, where a machine reads it. It was already in this list and said
+	// nothing about itself, which is the half that made it read as work.
+	run := engine.Result{Controls: map[string]plugin.ControlResult{
+		"secrets": {Control: "secrets", Report: sarif.Report{Results: []sarif.Result{
+			{RuleID: "github-pat", Level: sarif.LevelError, Priority: "P1", Suppression: &sarif.Suppression{
+				Kind: "external", Justification: "a documentation example", AcceptedBy: "someone@example.test",
+			}},
+		}}},
+	}}
+	var buf bytes.Buffer
+	if err := RenderJSON(&buf, saga.Release{Version: "1"}, run, sampleVerdict(), "P4"); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Findings []struct {
+			RuleID     string `json:"ruleId"`
+			Suppressed *struct {
+				Justification string `json:"justification"`
+				AcceptedBy    string `json:"acceptedBy"`
+			} `json:"suppressed"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Findings) != 1 {
+		t.Fatalf("got %d findings, want the excused one kept", len(doc.Findings))
+	}
+	got := doc.Findings[0].Suppressed
+	if got == nil {
+		t.Fatal("the excused finding is in the list and does not say it was excused")
+	}
+	if got.Justification == "" || got.AcceptedBy == "" {
+		t.Errorf("suppressed = %+v, want the reason and who accepted it", got)
+	}
+}
+
+// TestTheDocumentNamesOneGate holds report.json to the rule the descriptor and the flags are held
+// to. The console says one thing; a document saying two is the contradiction arriving one layer
+// down, where a machine reads it and a person does not.
+func TestTheDocumentNamesOneGate(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		policy        norn.Policy
+		wantThreshold string
+		wantBand      string
+	}{
+		{"nothing named", norn.Policy{}, "", norn.DefaultPriority},
+		{"a band", norn.Policy{FailOnPriority: "P2"}, "", "P2"},
+		{"a severity", norn.Policy{FailOn: sarif.SeverityCritical}, "critical", ""},
+		{
+			"a per-control threshold alone still chooses severity",
+			norn.Policy{PerControl: map[string]sarif.Severity{"sca": sarif.SeverityLow}},
+			"", "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := describeGate(&Gate{Policy: tc.policy})
+			if got.Threshold != tc.wantThreshold {
+				t.Errorf("threshold = %q, want %q", got.Threshold, tc.wantThreshold)
+			}
+			if got.FailOnPriority != tc.wantBand {
+				t.Errorf("failOnPriority = %q, want %q", got.FailOnPriority, tc.wantBand)
+			}
+			if got.Threshold != "" && got.FailOnPriority != "" {
+				t.Errorf("both stated: %+v", got)
+			}
+		})
 	}
 }

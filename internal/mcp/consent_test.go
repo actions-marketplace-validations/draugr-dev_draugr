@@ -17,7 +17,7 @@ import (
 // descriptor.
 func TestDescribeScanNamesWhatThisDescriptorDoes(t *testing.T) {
 	model := &saga.Model{
-		Config: saga.Config{Controllers: map[string]saga.ControllerSettings{
+		Config: saga.Config{Controls: map[string]saga.ControllerSettings{
 			"secrets": {"enabled": true},
 			"sca":     {"enabled": true},
 		}},
@@ -41,7 +41,7 @@ func TestDescribeScanNamesWhatThisDescriptorDoes(t *testing.T) {
 func TestDescribeScanSaysWhenItWillProbeALiveHost(t *testing.T) {
 	model := &saga.Model{
 		Config: saga.Config{
-			Controllers:  map[string]saga.ControllerSettings{"dast": {"enabled": true}},
+			Controls:     map[string]saga.ControllerSettings{"dast": {"enabled": true}},
 			AllowEffects: saga.EffectPermissions{"network"},
 		},
 		Components: []saga.Component{
@@ -65,7 +65,7 @@ func TestDescribeScanSaysWhenItWillProbeALiveHost(t *testing.T) {
 func TestDescribeScanNamesWhereResultsGo(t *testing.T) {
 	model := &saga.Model{
 		Config: saga.Config{
-			Controllers: map[string]saga.ControllerSettings{"secrets": {"enabled": true}},
+			Controls: map[string]saga.ControllerSettings{"secrets": {"enabled": true}},
 			Publishers: []saga.PublisherConfig{
 				{Kind: "file", Dir: "out/reports"},
 				{Kind: "github", Repo: "acme/app"},
@@ -99,11 +99,11 @@ func TestScanDeliversTheDescriptorsPublishers(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "reports")
 	path := filepath.Join(dir, "published.saga.yaml")
-	// No control enabled, so this needs no scanner binary and no network — the publisher still
-	// has a complete run to render, which is the part under test.
+	// No control enabled, so this needs no scanner binary and no network. The publisher still has a
+	// complete run to render, which is the part under test.
 	if err := os.WriteFile(path, []byte(
-		"release:\n  name: app\n  version: \"1.0\"\n"+
-			"config:\n  reports:\n    - format: sarif\n  publishers:\n    - kind: file\n      dir: "+out+"\n"+
+		"project: app\nrelease:\n  version: \"1.0\"\n"+
+			"config:\n  publishers:\n    - kind: file\n      dir: "+out+"\n      reports:\n        - format: sarif\n"+
 			"components:\n  - name: api\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestScanReportsNoDeliveryWhenNoneIsConfigured(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plain.saga.yaml")
 	if err := os.WriteFile(path, []byte(
-		"release:\n  name: app\n  version: \"1.0\"\ncomponents:\n  - name: api\n"), 0o600); err != nil {
+		"project: app\nrelease:\n  version: \"1.0\"\ncomponents:\n  - name: api\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, res, err := scanTool(builtins.Registry(), ScanAlways)(context.Background(), nil, ScanInput{Path: path})

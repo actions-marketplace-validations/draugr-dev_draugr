@@ -5,12 +5,15 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/draugr-dev/draugr/internal/surfaces"
 	"github.com/draugr-dev/draugr/pkg/engine"
 	"github.com/draugr-dev/draugr/pkg/norn"
+	"github.com/draugr-dev/draugr/pkg/report"
 	"github.com/draugr-dev/draugr/pkg/saga"
+	"github.com/draugr-dev/draugr/pkg/tui"
 )
 
 // tipContext is everything a tip may be gated on: the descriptor, what the run produced, the
@@ -26,26 +29,42 @@ type tipContext struct {
 	opts    *scanOptions
 }
 
-// scanTip is one advisory line and the condition under which it earns its place.
+// gatesOnSeverity reports whether this run was judged on a finding's own severity rather than on
+// the band it landed in. The two are exclusive, and which one it is decides whether half the advice
+// here applies at all.
+func (c tipContext) gatesOnSeverity() bool {
+	if c.opts.failOn != "" {
+		return true
+	}
+	if c.opts.failOnPriority != "" {
+		return false
+	}
+	kind, _ := c.model.Config.Gate.Resolved()
+	return kind == saga.GateSeverity
+}
+
+// scanTip is one thing worth trying and the condition under which it earns its place.
 type scanTip struct {
 	// name identifies the tip in tests. Never printed.
 	name string
 	// when reports whether this run is one the tip helps with. Tips are advisory, so the bar is
 	// not "is this true" but "does the reader do something differently knowing it".
 	when func(tipContext) bool
-	// text is the line, without the "Tip: " prefix.
-	text func(tipContext) string
+	// what to type, or the key to add to the descriptor.
+	what func(tipContext) string
+	// why, in a clause that fits beside it.
+	why func(tipContext) string
 }
 
 // maxTipsPerRun caps how many tips one scan may print.
 //
-// The limit is the feature. Every tip here is individually reasonable, and a run that prints
-// five of them has taught the reader to skip the block — at which point the one that mattered is
-// lost with the rest. Two is enough to be useful and few enough to still be read.
+// The limit is the feature. Every tip here is individually reasonable, and a run that prints five
+// of them has taught the reader to skip the block, at which point the one that mattered is lost
+// with the rest. Two is enough to be useful and few enough to still be read.
 const maxTipsPerRun = 2
 
 // scanTips is the tip library, in descending order of what a reader gains from it. The first
-// maxTipsPerRun whose condition holds are printed.
+// maxTipsPerRun whose condition holds are offered.
 //
 // Ordered by consequence rather than by how often each fires: a run that both passed with P1
 // findings ungated and took a long time without a cache has one problem worth naming and one
@@ -56,52 +75,30 @@ var scanTips = []scanTip{
 		// the reader's mental model of the run is wrong rather than merely incomplete.
 		name: "priority-gate",
 		when: func(c tipContext) bool {
-			return c.opts.failOnPriority == "" && !c.opts.noGate &&
+			// Only where the gate asks about severity. Under the default it already asks about
+			// the band, and telling somebody to add the gate they are already running is advice
+			// that reads as the product not knowing what it did.
+			return c.gatesOnSeverity() && !c.opts.noGate &&
 				c.verdict.Verdict == norn.Pass && countAtOrAbove(c.run, "P2") > 0
 		},
-		text: func(c tipContext) string {
-			n := countAtOrAbove(c.run, "P2")
-			return fmt.Sprintf("this run passed with %d P1/P2 finding(s) — severity thresholds do not "+
-				"look at priority. Add --fail-on-priority P2 to gate on risk as well.", n)
+		what: func(tipContext) string { return "--fail-on P2" },
+		why: func(c tipContext) string {
+			return fmt.Sprintf("this passed on severity with %d P1/P2 %s",
+				countAtOrAbove(c.run, "P2"), plural2(countAtOrAbove(c.run, "P2"), "finding", "findings"))
 		},
 	},
 	{
-		// A report rendered to a CI log and nowhere else is the failure this catches: the run
-		// worked, and the evidence lives only in a log somebody has to go and find.
-		name: "publish",
-		// --no-publish is respected rather than ignored: a caller who has said not to publish is
-		// not asking where the report should go. The diff workflow scans both sides of a pull
-		// request with exactly that flag.
-		when: func(c tipContext) bool {
-			return inCI() && c.opts.outputDir == "" && len(c.model.Config.Publishers) == 0 && !c.opts.noPublish
-		},
-		text: func(tipContext) string {
-			return "this looks like CI and the report exists only in this log. Keep it with " +
-				"-o <dir>, or send it somewhere with config.publishers."
-		},
-	},
-	{
-		// A descriptor written by hand describes what a team builds, so "self" is the right
-		// default. One written by a surveyor describes a running cluster, where most images come
-		// from somebody else — and there the fix list tells the reader to upgrade libraries
-		// inside images they cannot rebuild, which is advice they cannot take.
+		// A descriptor written by hand describes what a team builds, so "self" is the right default.
+		// One written by a surveyor describes a running cluster, where most images come from somebody
+		// else, and there the fix list tells the reader to upgrade libraries inside images they cannot
+		// rebuild, which is advice they cannot take.
 		name: "built-upstream",
 		when: func(c tipContext) bool {
 			return hasImageFindings(c.run) && !declaresBuiltBy(c.model)
 		},
-		text: func(tipContext) string {
-			return "images you only run need `builtBy: upstream`, or the fix list tells you to " +
-				"upgrade packages you cannot reach."
-		},
-	},
-	{
-		name: "classify",
-		when: func(c tipContext) bool {
-			return hasFindings(c.run) && !usesRiskClassification(c.model)
-		},
-		text: func(tipContext) string {
-			return "no components set exposure/criticality, so priorities use severity alone. " +
-				"Run `draugr classify` to make P1–P4 reflect real risk."
+		what: func(tipContext) string { return "builtBy: upstream" },
+		why: func(tipContext) string {
+			return "the fix list says to upgrade packages inside images you do not build"
 		},
 	},
 	{
@@ -111,60 +108,84 @@ var scanTips = []scanTip{
 		when: func(c tipContext) bool {
 			return c.opts.cacheDir == "" && c.run.Stats.Duration >= cacheTipThreshold
 		},
-		text: func(c tipContext) string {
-			return fmt.Sprintf("this run took %s and cached nothing. --cache-dir <dir> reuses results "+
-				"for inputs that have not changed.", c.run.Stats.Duration.Round(time.Second))
+		what: func(tipContext) string { return "--cache-dir <dir>" },
+		why: func(c tipContext) string {
+			return fmt.Sprintf("this run took %s and cached nothing",
+				c.run.Stats.Duration.Round(time.Second))
 		},
+	},
+	{
+		// Only where something went unexamined, which is when a reader has a reason to go and read
+		// what the controls are. On every other run it is a row that never changes.
+		name: "controls",
+		when: func(c tipContext) bool { return len(surfaces.Gaps(c.model)) > 0 },
+		what: func(tipContext) string { return "draugr controls" },
+		why:  func(tipContext) string { return "what each control looks at, and what turns it on" },
 	},
 }
 
 // cacheTipThreshold is how long a run must take before suggesting a cache is worth the words.
 const cacheTipThreshold = 60 * time.Second
 
-// printScanTips writes the uncovered-surface note and up to maxTipsPerRun contextual hints after
-// a console scan — small nudges that help someone new to security get more out of Draugr. Tips
-// are advisory and never affect the verdict. They are suppressed by --no-tips or the
-// DRAUGR_NO_TIPS environment variable.
-func printScanTips(w io.Writer, c tipContext) {
-	if c.opts.noTips || tipsDisabled() || c.model == nil {
+// printUncoveredSurfaceNote names what a descriptor declares and no enabled control looks at.
+//
+// For `doctor`, which answers "is this set up" and where a declared surface nothing examines is
+// part of the answer. A scan reports the same facts through the report itself, beside the verdict
+// they qualify.
+func printUncoveredSurfaceNote(w io.Writer, model *saga.Model) {
+	gaps := surfaces.Gaps(model)
+	if len(gaps) == 0 {
 		return
 	}
-	printUncoveredSurfaceNote(w, c.model)
+	col := tui.For(w)
+	_, _ = fmt.Fprintf(w, "\n%s\n", col.Paint(tui.StyleMuted, "NOT CHECKED"))
+	t := tui.NewTable(col).Indent("  ")
+	for _, g := range gaps {
+		t.Row(tui.Styled(tui.StyleStrong, g.Component+" "+g.Surface),
+			tui.Styled(tui.StyleMuted, fmt.Sprintf("%d %s off: %s", len(g.Controls),
+				plural2(len(g.Controls), "control", "controls"), strings.Join(g.Controls, ", "))))
+	}
+	t.Render(w)
+}
 
-	shown := 0
+// uncoveredFor is what the descriptor declares and no enabled control examines, in the report's
+// own terms.
+func uncoveredFor(model *saga.Model) []report.Gap {
+	if model == nil {
+		return nil
+	}
+	gaps := surfaces.Gaps(model)
+	out := make([]report.Gap, 0, len(gaps))
+	for _, g := range gaps {
+		out = append(out, report.Gap{Component: g.Component, Surface: g.Surface, Controls: g.Controls})
+	}
+	return out
+}
+
+// scanSuggestions is what this run makes worth trying, for the report's own block.
+//
+// Returned rather than printed. They were a second block of loose lines under a report that had
+// just finished with one, each a sentence naming a flag in the middle of it, and a reader looking
+// for something to type had to read all of them to find out which applied. The report has a place
+// for this now, and one place beats two.
+//
+// Suppressed by --no-tips or DRAUGR_NO_TIPS, which is what those have always meant: the advisory
+// rows go and the ones describing the report itself stay.
+func scanSuggestions(c tipContext) []report.Suggestion {
+	if c.opts.noTips || tipsDisabled() || c.model == nil {
+		return nil
+	}
+	out := make([]report.Suggestion, 0, maxTipsPerRun)
 	for _, tip := range scanTips {
-		if shown == maxTipsPerRun {
-			return
+		if len(out) == maxTipsPerRun {
+			break
 		}
 		if !tip.when(c) {
 			continue
 		}
-		_, _ = fmt.Fprintf(w, "\nTip: %s\n", tip.text(c))
-		shown++
+		out = append(out, report.Suggestion{What: tip.what(c), Why: tip.why(c)})
 	}
-}
-
-// printUncoveredSurfaceNote reports the surfaces this descriptor declares that no enabled control
-// looks at.
-//
-// Not a tip and not counted against the tip budget: the tips describe a run that could be more
-// useful, and this describes one whose result covers less than the reader will assume it does.
-func printUncoveredSurfaceNote(w io.Writer, model *saga.Model) {
-	lines := surfaces.Uncovered(model)
-	if len(lines) == 0 {
-		return
-	}
-	_, _ = fmt.Fprintf(w, "\nNot checked:\n")
-	for _, l := range lines {
-		_, _ = fmt.Fprintf(w, "      %s\n", l)
-	}
-	// Named here because it is absent everywhere else. A reader who knows Draugr has a `dast`
-	// control, and sees a host listed as unchecked without it, reads the omission as a gap in
-	// this note rather than as the deliberate choice it is.
-	if surfaces.DeclaresHosts(model) {
-		_, _ = fmt.Fprint(w, "      dast is never suggested — it sends attack traffic. Enable it yourself.\n")
-	}
-	_, _ = fmt.Fprint(w, "      draugr controls — what each control does\n")
+	return out
 }
 
 // countAtOrAbove counts findings whose priority is at or above a band.
@@ -175,6 +196,12 @@ func countAtOrAbove(run engine.Result, band string) int {
 			if r.Suppressed() {
 				continue
 			}
+			// A second scanner's copy of a flaw already counted. Without this the tip told a
+			// reader that enabling the opt-in matcher had doubled their urgent work, when it had
+			// found the same flaws twice.
+			if r.Correlated() {
+				continue
+			}
 			if r.Priority != "" && r.Priority <= band {
 				n++
 			}
@@ -182,12 +209,6 @@ func countAtOrAbove(run engine.Result, band string) int {
 	}
 	return n
 }
-
-// inCI reports whether this looks like an automated run.
-//
-// Deliberately the generic variable rather than a list of vendors: every major CI system sets
-// `CI`, and a list of the ones we thought of would be wrong for whichever one a reader uses.
-func inCI() bool { return os.Getenv("CI") != "" }
 
 // plural2 picks between two forms by count.
 func plural2(n int, one, many string) string {
@@ -210,21 +231,11 @@ func sortedKeys[V any](m map[string]V) []string {
 // tipsDisabled reports whether tips are globally turned off via the environment.
 func tipsDisabled() bool { return os.Getenv("DRAUGR_NO_TIPS") != "" }
 
-// usesRiskClassification reports whether any component declares an exposure or criticality — the
+// usesRiskClassification reports whether any component declares an exposure or criticality. The
 // inputs that make priority ranking risk-aware rather than severity-only.
 func usesRiskClassification(model *saga.Model) bool {
 	for _, c := range model.Components {
 		if c.Exposure != "" || c.Criticality != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// hasFindings reports whether the run produced at least one finding across all controls.
-func hasFindings(run engine.Result) bool {
-	for _, cr := range run.Controls {
-		if len(cr.Report.Results) > 0 {
 			return true
 		}
 	}
@@ -242,11 +253,18 @@ func hasImageFindings(run engine.Result) bool {
 // Any, not all: a descriptor that has answered the question once has been told about it, and
 // repeating the advice for the images it left at the default would be nagging about a decision
 // somebody has already made.
+// declaresBuiltBy reports whether anything in the descriptor says who publishes it.
+//
+// A component-wide declaration counts: it covers every target under it, and a descriptor that has
+// said who publishes its images should not be nagged to say it again per image.
 func declaresBuiltBy(model *saga.Model) bool {
 	if model == nil {
 		return false
 	}
 	for _, c := range model.Components {
+		if c.BuiltBy != "" {
+			return true
+		}
 		for _, img := range c.Images {
 			if img.BuiltBy != "" {
 				return true

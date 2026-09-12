@@ -13,7 +13,7 @@ func TestValidateErrors(t *testing.T) {
 	}{
 		{
 			name: "missing version",
-			yaml: "release:\n  name: x\n",
+			yaml: "project: x\nrelease:\n",
 			want: "release.version is required",
 		},
 		{
@@ -120,13 +120,13 @@ func TestExposureCriticalityValid(t *testing.T) {
 }
 
 func TestValidateReportsAndPublishers(t *testing.T) {
-	yaml := "release:\n  version: '1'\nconfig:\n  reports:\n    - format: sarif\n    - format: markdown\n  publishers:\n    - kind: file\n      dir: ./out\n"
+	yaml := "release:\n  version: '1'\nconfig:\n  publishers:\n    - kind: file\n      dir: ./out\n      reports:\n        - format: sarif\n        - format: markdown\n"
 	m, err := Load([]byte(yaml))
 	if err != nil {
-		t.Fatalf("valid reports/publishers should load, got %v", err)
+		t.Fatalf("valid publishers should load, got %v", err)
 	}
-	if len(m.Config.Reports) != 2 || m.Config.Reports[0].Format != "sarif" {
-		t.Fatalf("reports not parsed: %+v", m.Config.Reports)
+	if got := m.Config.Publishers[0].Reports; len(got) != 2 || got[0].Format != "sarif" {
+		t.Fatalf("reports not parsed: %+v", got)
 	}
 	if len(m.Config.Publishers) != 1 || m.Config.Publishers[0].Kind != "file" || m.Config.Publishers[0].Dir != "./out" {
 		t.Fatalf("publishers not parsed: %+v", m.Config.Publishers)
@@ -134,12 +134,12 @@ func TestValidateReportsAndPublishers(t *testing.T) {
 }
 
 func TestValidateReportsPublishersRequireFields(t *testing.T) {
-	yaml := "release:\n  version: '1'\nconfig:\n  reports:\n    - format: ''\n  publishers:\n    - dir: ./out\n"
+	yaml := "release:\n  version: '1'\nconfig:\n  publishers:\n    - dir: ./out\n      reports:\n        - format: ''\n"
 	_, err := Load([]byte(yaml))
 	if err == nil {
 		t.Fatal("expected errors for empty report format and missing publisher kind")
 	}
-	for _, want := range []string{"config.reports[0].format is required", "config.publishers[0].kind is required"} {
+	for _, want := range []string{"config.publishers[0].reports[0].format is required", "config.publishers[0].kind is required"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
@@ -161,7 +161,7 @@ func TestValidateAggregatesMultiple(t *testing.T) {
 func TestValidateSBOMFormat(t *testing.T) {
 	base := func(f SBOMFormat) *Model {
 		return &Model{
-			Release: Release{Name: "x", Version: "1"},
+			Release: Release{Version: "1"},
 			Config:  Config{SBOM: &SBOMConfig{Enabled: true, Format: f}},
 		}
 	}
@@ -170,12 +170,12 @@ func TestValidateSBOMFormat(t *testing.T) {
 			t.Errorf("format %q should validate: %v", f, err)
 		}
 	}
-	// Empty means "the default", which callers resolve — it must not be rejected here.
+	// Empty means "the default", which callers resolve. It must not be rejected here.
 	if err := base("").Validate(); err != nil {
 		t.Errorf("an unset format should validate: %v", err)
 	}
-	// syft-json is a real Syft format we deliberately don't offer — vendor-specific rather than
-	// an interchange standard — so it has to be rejected, not quietly passed through to Syft.
+	// syft-json is a real Syft format we deliberately don't offer, vendor-specific rather than an
+	// interchange standard. So it has to be rejected, not quietly passed through to Syft.
 	err := base("syft-json").Validate()
 	if err == nil {
 		t.Fatal("want an error for an unsupported format")
@@ -189,7 +189,7 @@ func TestValidateSBOMFormat(t *testing.T) {
 }
 
 func TestSBOMConfigRoundTripsThroughLoad(t *testing.T) {
-	m, err := Load([]byte("release:\n  name: x\n  version: \"1\"\nconfig:\n  sbom:\n    enabled: true\n    format: cyclonedx-json\n"))
+	m, err := Load([]byte("project: x\nrelease:\n  version: \"1\"\nconfig:\n  sbom:\n    enabled: true\n    format: cyclonedx-json\n"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestExcludeRuleMatching(t *testing.T) {
 
 func TestValidateExclude(t *testing.T) {
 	base := func(e ExcludeRule) *Model {
-		return &Model{Release: Release{Name: "x", Version: "1"}, Config: Config{Exclude: []ExcludeRule{e}}}
+		return &Model{Release: Release{Version: "1"}, Config: Config{Exclude: []ExcludeRule{e}}}
 	}
 	if err := base(ExcludeRule{Paths: []string{"examples/"}, Reason: "templates"}).Validate(); err != nil {
 		t.Errorf("a well-formed exclusion should validate: %v", err)
@@ -271,7 +271,7 @@ func TestExcludeRuleWildcards(t *testing.T) {
 		{"*/somelib/*", lic, true},     // wildcard on both sides
 		{"license/*/thing", lic, true}, // suffix anchored
 		{"license/*/other", lic, false},
-		// Existing exact ids keep working — no scanner emits a literal `*`.
+		// Existing exact ids keep working, no scanner emits a literal `*`.
 		{"private-key", "private-key", true},
 		{"private-key", "aws-key", false},
 		{"CVE-2019-*", "CVE-2019-20477", true},
@@ -315,8 +315,11 @@ func TestExcludeRulePathsStillUsePathSemantics(t *testing.T) {
 }
 
 func TestValidateGateControls(t *testing.T) {
+	// With a failOn, because a per-control threshold refines a severity gate and needs one to
+	// refine; that rule has its own test below.
 	base := func(controls map[string]string) *Model {
-		return &Model{Release: Release{Name: "x", Version: "1"}, Config: Config{Gate: &GateConfig{Controls: controls}}}
+		return &Model{Release: Release{Version: "1"},
+			Config: Config{Gate: &GateConfig{FailOn: "high", Controls: controls}}}
 	}
 	// The bands the report prints, which is the vocabulary a threshold is written in.
 	if err := base(map[string]string{"licenses": "critical", "sast": "low"}).Validate(); err != nil {
@@ -363,7 +366,7 @@ func TestValidateRejectsUnusableControllerKeys(t *testing.T) {
 			t.Parallel()
 			m := &Model{
 				Release: Release{Version: "1.0"},
-				Config:  Config{Controllers: map[string]ControllerSettings{"infrastructure": tc.settings}},
+				Config:  Config{Controls: map[string]ControllerSettings{"infrastructure": tc.settings}},
 			}
 			err := m.Validate()
 			if err == nil {
@@ -381,10 +384,10 @@ func TestValidateRejectsUnusableControllerKeys(t *testing.T) {
 // removedControllerKeys is empty today, so the mechanism is exercised with an entry of its own
 // rather than with whatever legacy happens to be listed.
 //
-// It exists for the setting whose replacement is a different shape rather than a new name — the
-// "no such scanner key" error can list what a control accepts, but it cannot explain that one
-// setting became three blocks. Untested, an empty map is indistinguishable from a dead one, and
-// the day it is needed is not the day to find out it stopped working.
+// It exists for the setting whose replacement is a different shape rather than a new name, the "no
+// such scanner key" error can list what a control accepts, but it cannot explain that one setting
+// became three blocks. Untested, an empty map is indistinguishable from a dead one, and the day it
+// is needed is not the day to find out it stopped working.
 func TestRemovedControllerKeysExplainTheReplacement(t *testing.T) {
 	removedControllerKeys["infrastructure"] = map[string]string{
 		"mode": "per-scanner blocks: `kubeBenchJob: { enabled: true }`",
@@ -393,7 +396,7 @@ func TestRemovedControllerKeysExplainTheReplacement(t *testing.T) {
 
 	m := &Model{
 		Release: Release{Version: "1.0"},
-		Config: Config{Controllers: map[string]ControllerSettings{
+		Config: Config{Controls: map[string]ControllerSettings{
 			"infrastructure": {"mode": "job"},
 		}},
 	}
@@ -415,8 +418,8 @@ func TestValidateChecksComponentControllerKeys(t *testing.T) {
 	m := &Model{
 		Release: Release{Version: "1.0"},
 		Components: []Component{{
-			Name:        "web",
-			Controllers: map[string]ControllerSettings{"tls": {"draugr-tls": map[string]any{"enabled": false}}},
+			Name:     "web",
+			Controls: map[string]ControllerSettings{"tls": {"draugr-tls": map[string]any{"enabled": false}}},
 		}},
 	}
 	err := m.Validate()
@@ -430,7 +433,7 @@ func TestValidateAcceptsCamelCaseControllerKeys(t *testing.T) {
 	t.Parallel()
 	m := &Model{
 		Release: Release{Version: "1.0"},
-		Config: Config{Controllers: map[string]ControllerSettings{
+		Config: Config{Controls: map[string]ControllerSettings{
 			"infrastructure": {"enabled": true, "kubeBenchJob": map[string]any{"enabled": true}},
 		}},
 	}
@@ -440,7 +443,7 @@ func TestValidateAcceptsCamelCaseControllerKeys(t *testing.T) {
 }
 
 func TestExploitabilityConfigRoundTripsThroughLoad(t *testing.T) {
-	m, err := Load([]byte("release:\n  name: x\n  version: \"1\"\n" +
+	m, err := Load([]byte("project: x\nrelease:\n  version: \"1\"\n" +
 		"config:\n  exploitability:\n    kev: cache\n    epss: auto\n" +
 		"    epssThreshold: 0.1\n    maxAge: 168h\n"))
 	if err != nil {
@@ -458,7 +461,7 @@ func TestExploitabilityConfigRoundTripsThroughLoad(t *testing.T) {
 func TestExploitabilityThresholdZeroIsNotAbsent(t *testing.T) {
 	// Zero disables the EPSS bump while leaving KEV in force, which is a thing someone might
 	// mean. It has to survive the round trip as a set value rather than as "unspecified".
-	m, err := Load([]byte("release:\n  name: x\n  version: \"1\"\n" +
+	m, err := Load([]byte("project: x\nrelease:\n  version: \"1\"\n" +
 		"config:\n  exploitability:\n    kev: cache\n    epssThreshold: 0\n"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -490,7 +493,7 @@ func TestExploitabilityConfigValidation(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := Load([]byte("release:\n  name: x\n  version: \"1\"\n" + c.yaml))
+			_, err := Load([]byte("project: x\nrelease:\n  version: \"1\"\n" + c.yaml))
 			if err == nil {
 				t.Fatal("accepted")
 			}
@@ -502,7 +505,7 @@ func TestExploitabilityConfigValidation(t *testing.T) {
 
 	// A path is not checkable here: a shared descriptor may name a file this machine does not
 	// have, which is a scan-time error rather than a validation one.
-	if _, err := Load([]byte("release:\n  name: x\n  version: \"1\"\n" +
+	if _, err := Load([]byte("project: x\nrelease:\n  version: \"1\"\n" +
 		"config:\n  exploitability:\n    kev: ./kev.json\n    maxAge: 24h\n")); err != nil {
 		t.Errorf("a file path should validate: %v", err)
 	}
@@ -517,7 +520,8 @@ func TestValidateReportMinPriority(t *testing.T) {
 	for _, band := range []string{"P1", "P4"} {
 		m := &Model{
 			Release: Release{Version: "1"},
-			Config:  Config{Reports: []ReportConfig{{Format: "sarif", MinPriority: band}}},
+			Config: Config{Publishers: []PublisherConfig{{Kind: "file", Dir: "./out",
+				Reports: []ReportConfig{{Format: "sarif", MinPriority: band}}}}},
 		}
 		if err := m.Validate(); err != nil {
 			t.Errorf("%s rejected: %v", band, err)
@@ -525,7 +529,8 @@ func TestValidateReportMinPriority(t *testing.T) {
 	}
 	m := &Model{
 		Release: Release{Version: "1"},
-		Config:  Config{Reports: []ReportConfig{{Format: "sarif", MinPriority: "urgent"}}},
+		Config: Config{Publishers: []PublisherConfig{{Kind: "file", Dir: "./out",
+			Reports: []ReportConfig{{Format: "sarif", MinPriority: "urgent"}}}}},
 	}
 	err := m.Validate()
 	if err == nil {
@@ -539,7 +544,8 @@ func TestValidateReportMinPriority(t *testing.T) {
 	// Unset stays the common case and must not be reported.
 	clean := &Model{
 		Release: Release{Version: "1"},
-		Config:  Config{Reports: []ReportConfig{{Format: "sarif"}}},
+		Config: Config{Publishers: []PublisherConfig{{Kind: "file", Dir: "./out",
+			Reports: []ReportConfig{{Format: "sarif"}}}}},
 	}
 	if err := clean.Validate(); err != nil {
 		t.Errorf("a report with no band was rejected: %v", err)
@@ -547,7 +553,7 @@ func TestValidateReportMinPriority(t *testing.T) {
 }
 
 // TestValidateHostAuth covers the block whose whole purpose is that a credential cannot be written
-// into a committed file — so every way of getting it wrong has to be caught at load.
+// into a committed file, so every way of getting it wrong has to be caught at load.
 func TestValidateHostAuth(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -617,7 +623,7 @@ func assertValidation(t *testing.T, errs []error, want string) {
 // depending on which way the comparison fell.
 func TestValidateGateFailOnPriority(t *testing.T) {
 	base := func(p string) *Model {
-		return &Model{Release: Release{Name: "x", Version: "1"},
+		return &Model{Release: Release{Version: "1"},
 			Config: Config{Gate: &GateConfig{FailOnPriority: p}}}
 	}
 	for _, ok := range []string{"", "P1", "P4"} {
@@ -631,5 +637,63 @@ func TestValidateGateFailOnPriority(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "P1") {
 		t.Errorf("the error should name the bands: %v", err)
+	}
+}
+
+// TestAGateAsksOneQuestion holds the exclusivity where a descriptor states it.
+//
+// Refused rather than resolved by a precedence: whichever lost would sit in a reviewed file doing
+// nothing, and somebody reading a failing build would have two candidates for why.
+func TestAGateAsksOneQuestion(t *testing.T) {
+	with := func(g *GateConfig) error {
+		return (&Model{Release: Release{Version: "1"}, Config: Config{Gate: g}}).Validate()
+	}
+	err := with(&GateConfig{FailOn: "high", FailOnPriority: "P1"})
+	if err == nil {
+		t.Fatal("a descriptor setting both gates was accepted")
+	}
+	// The message has to say what to do, not only that something is wrong: somebody who wrote
+	// both wanted both, and the answer is that one field now takes either vocabulary.
+	for _, want := range []string{"failOn", "failOnPriority", "one decision", "P1", "critical"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message does not mention %q: %v", want, err)
+		}
+	}
+	// Either one alone is fine, and so is neither: nothing named is the default gate.
+	for _, g := range []*GateConfig{
+		{FailOn: "critical"},
+		{FailOnPriority: "P2"},
+		{},
+	} {
+		if err := with(g); err != nil {
+			t.Errorf("%+v should be valid: %v", g, err)
+		}
+	}
+	// A per-control threshold with nothing to refine.
+	if err := with(&GateConfig{Controls: map[string]string{"licenses": "critical"}}); err == nil {
+		t.Error("per-control thresholds were accepted with no gate to refine")
+	}
+	// One run, one vocabulary. A severity under a band gate is a second question asked of one
+	// control, which is where two keys left the reader.
+	mixed := with(&GateConfig{FailOn: "P1", Controls: map[string]string{"licenses": "critical"}})
+	if mixed == nil {
+		t.Error("a severity threshold was accepted under a band gate")
+	}
+	// And the matching pair is fine, in either vocabulary.
+	for _, g := range []*GateConfig{
+		{FailOn: "P1", Controls: map[string]string{"licenses": "P2"}},
+		{FailOn: "high", Controls: map[string]string{"licenses": "critical"}},
+	} {
+		if err := with(g); err != nil {
+			t.Errorf("%+v should be valid: %v", g, err)
+		}
+	}
+	// The band spelling of failOn, which is new: one field, either vocabulary.
+	if err := with(&GateConfig{FailOn: "P2"}); err != nil {
+		t.Errorf("failOn should take a band: %v", err)
+	}
+	// An unparseable failOn is caught like any other threshold.
+	if err := with(&GateConfig{FailOn: "urgent"}); err == nil {
+		t.Error("config.gate.failOn accepted a word that is not a threshold")
 	}
 }

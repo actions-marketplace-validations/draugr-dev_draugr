@@ -17,8 +17,8 @@ import (
 	"github.com/draugr-dev/draugr/pkg/sarif"
 )
 
-const doctorSagaRepoAndImage = `release:
-  name: app
+const doctorSagaRepoAndImage = `project: app
+release:
   version: "1.0"
 config:
   controllers:
@@ -34,8 +34,8 @@ components:
       - image: alpine:3.19
 `
 
-const doctorSagaImagesOnly = `release:
-  name: app
+const doctorSagaImagesOnly = `project: app
+release:
   version: "1.0"
 config:
   controllers:
@@ -47,8 +47,8 @@ components:
       - image: alpine:3.19
 `
 
-const doctorSagaNoControls = `release:
-  name: app
+const doctorSagaNoControls = `project: app
+release:
   version: "1.0"
 components:
   - name: web
@@ -57,8 +57,8 @@ components:
 `
 
 // doctorSagaSAST enables sast; the scanners list controls whether gosec is required.
-const doctorSagaSASTDefault = `release:
-  name: app
+const doctorSagaSASTDefault = `project: app
+release:
   version: "1.0"
 config:
   controllers:
@@ -70,8 +70,8 @@ components:
       - url: .
 `
 
-const doctorSagaSASTGosec = `release:
-  name: app
+const doctorSagaSASTGosec = `project: app
+release:
   version: "1.0"
 config:
   controllers:
@@ -85,8 +85,8 @@ components:
       - url: .
 `
 
-// TestRunDoctorSASTScannerSelection verifies gosec is only a required tool when the sast
-// scanner set selects it — default sast (semgrep) must not demand gosec (it's opt-in).
+// TestRunDoctorSASTScannerSelection verifies gosec is only a required tool when the sast scanner
+// set selects it. Default sast (semgrep) must not demand gosec (it's opt-in).
 func TestRunDoctorSASTScannerSelection(t *testing.T) {
 	// Default sast → semgrep required, gosec not. With only semgrep+git present, doctor passes.
 	var out bytes.Buffer
@@ -252,8 +252,8 @@ func TestDoctorCommandViaCobra(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	// Nothing is enabled, so nothing is required — which must not read the same as having
-	// checked a list of tools and found them all.
+	// Nothing is enabled, so nothing is required. Which must not read the same as having checked a
+	// list of tools and found them all.
 	if !strings.Contains(out.String(), "No external tools required") {
 		t.Errorf("output = %q", out.String())
 	}
@@ -302,7 +302,7 @@ func TestRequiredToolsIncludesSyftOnlyWhenSBOMIsEnabled(t *testing.T) {
 	// a Saga could ask for SBOMs and doctor would report a ready environment.
 	reg := builtins.Registry()
 
-	off := &saga.Model{Release: saga.Release{Name: "a", Version: "1"}}
+	off := &saga.Model{Release: saga.Release{Version: "1"}}
 	for _, tl := range requiredTools(reg, off) {
 		if tl.Binary == "syft" {
 			t.Error("syft should not be required when config.sbom is absent")
@@ -310,7 +310,7 @@ func TestRequiredToolsIncludesSyftOnlyWhenSBOMIsEnabled(t *testing.T) {
 	}
 
 	on := &saga.Model{
-		Release: saga.Release{Name: "a", Version: "1"},
+		Release: saga.Release{Version: "1"},
 		Config:  saga.Config{SBOM: &saga.SBOMConfig{Enabled: true}},
 	}
 	var found bool
@@ -325,7 +325,7 @@ func TestRequiredToolsIncludesSyftOnlyWhenSBOMIsEnabled(t *testing.T) {
 
 	// enabled:false is a deliberate off switch, not a request.
 	paused := &saga.Model{
-		Release: saga.Release{Name: "a", Version: "1"},
+		Release: saga.Release{Version: "1"},
 		Config:  saga.Config{SBOM: &saga.SBOMConfig{Enabled: false}},
 	}
 	for _, tl := range requiredTools(reg, paused) {
@@ -335,7 +335,68 @@ func TestRequiredToolsIncludesSyftOnlyWhenSBOMIsEnabled(t *testing.T) {
 	}
 }
 
-const doctorSagaInfrastructure = `release: {name: platform, version: "1.0"}
+// TestRequiredToolsIncludesAReachabilityAnalyzer is the mirror of the syft test above, for the
+// other requirement no scanner block declares. A reachability analyzer is named in
+// config.reachability and is deliberately not selectable from a scanner block, so the scanner
+// selection filters it out with everything the control will not run, and doctor reported a ready
+// environment for a descriptor whose scan then stopped on a missing analyzer.
+func TestRequiredToolsIncludesAReachabilityAnalyzer(t *testing.T) {
+	reg := builtins.Registry()
+	sca := saga.Config{
+		Controls: map[string]saga.ControllerSettings{"sca": {"enabled": true}},
+	}
+	requires := func(m *saga.Model, binary string) bool {
+		for _, tl := range requiredTools(reg, m) {
+			if tl.Binary == binary {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("named, with its control enabled", func(t *testing.T) {
+		on := &saga.Model{Release: saga.Release{Version: "1"}, Config: sca}
+		on.Config.Reachability = &saga.ReachabilityConfig{Analyzers: []string{"govulncheck"}}
+		if !requires(on, "govulncheck") {
+			t.Error("an analyzer named in config.reachability is a tool the scan will run")
+		}
+	})
+
+	t.Run("not named", func(t *testing.T) {
+		off := &saga.Model{Release: saga.Release{Version: "1"}, Config: sca}
+		if requires(off, "govulncheck") {
+			t.Error("govulncheck is opt-in; an absent reachability block does not ask for it")
+		}
+	})
+
+	// config.reachability is project-wide, so an analyzer whose control is switched off is a tool
+	// this scan will never reach for. Asking for it sends somebody to install a scanner that would
+	// not have run.
+	t.Run("named, with its control disabled", func(t *testing.T) {
+		paused := &saga.Model{
+			Release: saga.Release{Version: "1"},
+			Config: saga.Config{
+				Controls:     map[string]saga.ControllerSettings{"sca": {"enabled": false}},
+				Reachability: &saga.ReachabilityConfig{Analyzers: []string{"govulncheck"}},
+			},
+		}
+		if requires(paused, "govulncheck") {
+			t.Error("an analyzer for a disabled control is not required")
+		}
+	})
+
+	// An empty list is the same as omitting the block, which is what the field documents.
+	t.Run("named as an empty list", func(t *testing.T) {
+		empty := &saga.Model{Release: saga.Release{Version: "1"}, Config: sca}
+		empty.Config.Reachability = &saga.ReachabilityConfig{}
+		if requires(empty, "govulncheck") {
+			t.Error("no analyzers named means none required")
+		}
+	})
+}
+
+const doctorSagaInfrastructure = `project: platform
+release: {version: "1.0"}
 config:
   controllers:
     infrastructure:
@@ -348,7 +409,8 @@ components:
 
 // The same control with its default scanner, which reads the Kubernetes API and shells out to
 // nothing.
-const doctorSagaInfrastructureDefault = `release: {name: platform, version: "1.0"}
+const doctorSagaInfrastructureDefault = `project: platform
+release: {version: "1.0"}
 config:
   controllers:
     infrastructure: {enabled: true}
@@ -357,8 +419,8 @@ components:
     infrastructure: [{kind: kubernetes, ref: prod}]
 `
 
-// Some tools shell out in turn. kube-bench's CIS policy checks are scripts that invoke kubectl,
-// so a machine with kube-bench and no kubectl fails at scan time — after a preflight that said
+// Some tools shell out in turn. kube-bench's CIS policy checks are scripts that invoke kubectl, so
+// a machine with kube-bench and no kubectl fails at scan time, after a preflight that said
 // everything was fine.
 func TestRequiredToolsIncludesASecondaryBinary(t *testing.T) {
 	model, err := saga.LoadFile(writeSaga(t, doctorSagaInfrastructure))
@@ -371,17 +433,17 @@ func TestRequiredToolsIncludesASecondaryBinary(t *testing.T) {
 	}
 }
 
-// The other half of the same idea: a control requires the scanners it will run, not every one
-// that could serve it. The default here needs no binary at all, so demanding kube-bench and
-// kubectl would send someone to install tools the scan never uses — and report a control as
-// unable to run when it can.
+// The other half of the same idea: a control requires the scanners it will run, not every one that
+// could serve it. The default here needs no binary at all, so demanding kube-bench and kubectl
+// would send someone to install tools the scan never uses, and report a control as unable to run
+// when it can.
 func TestRequiredToolsFollowsScannerSelection(t *testing.T) {
 	model, err := saga.LoadFile(writeSaga(t, doctorSagaInfrastructureDefault))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := binaries(requiredTools(builtins.Registry(), model)); len(got) != 0 {
-		t.Errorf("infrastructure required = %v, want none — the default scanner execs nothing", got)
+		t.Errorf("infrastructure required = %v, want none, the default scanner execs nothing", got)
 	}
 }
 
@@ -435,9 +497,9 @@ func (unknownToolController) Aggregate([]sarif.Report) (plugin.ControlResult, er
 }
 
 func TestDoctorWithoutADescriptorReportsRatherThanFails(t *testing.T) {
-	// Nothing has been selected, so nothing is required. Treating the whole catalog as
-	// required told a clean machine it was missing seven tools it may never need — kube-bench
-	// most clearly, since the default infrastructure scanner is native and needs no binary.
+	// Nothing has been selected, so nothing is required. Treating the whole catalog as required told
+	// a clean machine it was missing seven tools it may never need, kube-bench most clearly, since
+	// the default infrastructure scanner is native and needs no binary.
 	var out bytes.Buffer
 	if err := runDoctor(context.Background(), &out, builtins.Registry(),
 		"", doctorRun{}, fakeDetect(), nil); err != nil {
@@ -466,10 +528,10 @@ func TestDoctorWithADescriptorStillFailsOnWhatItNeeds(t *testing.T) {
 	}
 }
 
-// doctorSagaUncovered declares an image and a host while enabling only the repository controls —
+// doctorSagaUncovered declares an image and a host while enabling only the repository controls,
 // the descriptor that scans clean having looked at neither.
-const doctorSagaUncovered = `release:
-  name: app
+const doctorSagaUncovered = `project: app
+release:
   version: "1.0"
 config:
   controllers:
@@ -496,7 +558,7 @@ func TestDoctorReportsUncoveredSurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reporting is not failing: %v\n%s", err, out.String())
 	}
-	for _, want := range []string{"Not checked", "declares images", "declares hosts"} {
+	for _, want := range []string{"NOT CHECKED", "web images", "web hosts", "dast"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("doctor never mentioned %q:\n%s", want, out.String())
 		}
@@ -580,7 +642,7 @@ func TestDoctorJSONCarriesUncoveredSurface(t *testing.T) {
 // TestMissingToolsAdviceOnlyOffersWhatWouldWork covers the difference between help and a wild
 // goose chase.
 //
-// Some scanners are execed but never distributed — the Mend CLI is proprietary — so `draugr tools
+// Some scanners are execed but never distributed. The Mend CLI is proprietary, so `draugr tools
 // install` cannot fetch them. Suggesting it anyway is worse than saying nothing: the command runs,
 // succeeds, and the tool is still missing.
 func TestMissingToolsAdviceOnlyOffersWhatWouldWork(t *testing.T) {
@@ -619,7 +681,7 @@ func TestMissingToolsAdviceOnlyOffersWhatWouldWork(t *testing.T) {
 //
 // `draugr tools install` fetches pinned releases Draugr verified, which it can only do for tools
 // it vouched for. A scanner whose binary is neither in that catalog nor named here leaves doctor
-// telling somebody to run a command that will never find it — advice worse than none, because it
+// telling somebody to run a command that will never find it, advice worse than none, because it
 // sends them looking for a bug in Draugr rather than at the tool's own documentation.
 //
 // Crossed against the live registry, so registering a scanner is what triggers the requirement.

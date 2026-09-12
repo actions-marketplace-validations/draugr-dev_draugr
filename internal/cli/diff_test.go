@@ -55,11 +55,11 @@ func TestRunDiffGateTrips(t *testing.T) {
 }
 
 func TestRunDiffGatePasses(t *testing.T) {
-	// Head only fixes a finding — no new ones, so no gate can trip.
+	// Head only fixes a finding, no new ones, so no gate can trip.
 	base := writeFile(t, "base.sarif", sarifDoc("CVE-1", "error", "img", "P1"))
 	head := writeFile(t, "head.sarif", `{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Draugr"}},"results":[]}]}`)
 	var out bytes.Buffer
-	if err := runDiff(context.Background(), base, head, diffOptions{failOnNew: "error", failOnNewPriority: "P1"}, &out); err != nil {
+	if err := runDiff(context.Background(), base, head, diffOptions{failOnNew: "error"}, &out); err != nil {
 		t.Errorf("gate should pass when there are no new findings: %v", err)
 	}
 	if !strings.Contains(out.String(), "1 fixed") {
@@ -129,9 +129,9 @@ func TestDiffUsesItsOwnStickyComment(t *testing.T) {
 }
 
 func TestDiffRejectsAThresholdItCannotRank(t *testing.T) {
-	// An unrecognized threshold ranks 0, and every new finding is at least that — so accepting
-	// one would quietly turn the gate into "fail on anything new" while reading like a
-	// narrowing. It has to be refused rather than defaulted.
+	// An unrecognized threshold ranks 0, and every new finding is at least that. So accepting one
+	// would quietly turn the gate into "fail on anything new" while reading like a narrowing. It has
+	// to be refused rather than defaulted.
 	cmd := newRootCommand()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -201,8 +201,8 @@ func TestDiffRefusesReportsOfDifferentScope(t *testing.T) {
 }
 
 func TestDiffComparesReportsOfTheSameScope(t *testing.T) {
-	// Two scoped runs of the same scope are comparable — that is the iteration loop the flag
-	// exists for, and refusing it would make the flag useless.
+	// Two scoped runs of the same scope are comparable. That is the iteration loop the flag exists
+	// for, and refusing it would make the flag useless.
 	sc := engine.Scope{Components: []string{"app"}, Controls: []string{"sca"}}
 	base := scopedSARIF(t, "base.sarif", sc)
 	head := scopedSARIF(t, "head.sarif", sc)
@@ -223,7 +223,7 @@ func TestDiffComparesTwoUnscopedReports(t *testing.T) {
 // A publisher that cannot deliver must not replace the verdict it was delivering.
 //
 // The gate is what the run is for. Returning the publish failure instead sends a reader to fix a
-// credential while the P1 the change introduced goes unmentioned — and on a merge request that is
+// credential while the P1 the change introduced goes unmentioned, and on a merge request that is
 // the difference between "your CI is misconfigured" and "this should not merge". `scan` already
 // reconciles the two this way.
 func TestDiffPublishFailureDoesNotHideTheGate(t *testing.T) {
@@ -252,7 +252,7 @@ func TestDiffPublishFailureDoesNotHideTheGate(t *testing.T) {
 }
 
 func TestDiffPublishFailureStillFailsAPassingGate(t *testing.T) {
-	// Nothing new, so the gate passes — but --publish did nothing, and a flag that silently does
+	// Nothing new, so the gate passes. But --publish did nothing, and a flag that silently does
 	// nothing is the thing this codebase refuses to ship.
 	t.Setenv("GITLAB_CI", "true")
 	t.Setenv("TF_BUILD", "")
@@ -280,5 +280,33 @@ func TestDiffPublishFailureStillFailsAPassingGate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "publishing failed") {
 		t.Errorf("the delivery problem is what went wrong and has to be named: %v", err)
+	}
+}
+
+// TestDiffTakesEitherVocabulary: the differential gate asks the same question as the one `scan`
+// applies, about a smaller set, so it is written the same way.
+func TestDiffTakesEitherVocabulary(t *testing.T) {
+	sev, band, err := resolveDiffGate("high", "")
+	if err != nil || sev != "high" || band != "" {
+		t.Errorf("severity: got %q %q %v", sev, band, err)
+	}
+	sev, band, err = resolveDiffGate("P1", "")
+	if err != nil || sev != "" || band != "P1" {
+		t.Errorf("band: got %q %q %v", sev, band, err)
+	}
+	// The older spelling still resolves, so a pipeline that predates the merge keeps working.
+	if _, band, err = resolveDiffGate("", "P2"); err != nil || band != "P2" {
+		t.Errorf("deprecated spelling: got %q %v", band, err)
+	}
+	// Nothing named decides nothing: unlike `scan`, an absent differential gate is a diff that is
+	// reported and gates nothing, which is what the two scans either side of it are for.
+	if sev, band, err = resolveDiffGate("", ""); err != nil || sev != "" || band != "" {
+		t.Errorf("absent: got %q %q %v", sev, band, err)
+	}
+	if _, _, err = resolveDiffGate("high", "P1"); err == nil {
+		t.Error("both spellings together were accepted")
+	}
+	if _, _, err = resolveDiffGate("urgent", ""); err == nil {
+		t.Error("a word in neither vocabulary was accepted")
 	}
 }

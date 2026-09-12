@@ -1,5 +1,5 @@
 name: Draugr Security Scan
-description: SAST, SCA, secrets, IaC and container scanning from one descriptor — one SARIF report and one pass/fail gate.
+description: SAST, SCA, secrets, IaC and container scanning from one descriptor, one SARIF report and one pass/fail gate.
 author: Draugr
 branding:
   icon: shield
@@ -17,11 +17,16 @@ inputs:
     default: latest
   fail-on:
     description: >-
-      Severity that fails the gate (critical, high, medium, low). Empty uses Draugr's default (high).
+      What fails the gate, in either vocabulary: a priority band (P1-P4), which folds in the
+      exposure and criticality your descriptor declares, or a severity (critical, high, medium,
+      low), which is what the scanner called the flaw on its own terms. Empty uses Draugr's
+      default, P1.
     required: false
     default: ""
   fail-on-priority:
-    description: Also fail the gate on any finding at or above this priority band (P1-P4).
+    description: >-
+      Deprecated: write the band in fail-on, which now takes either vocabulary. Still honored, and
+      refused alongside fail-on because the two are one decision.
     required: false
     default: ""
   min-priority:
@@ -42,7 +47,7 @@ inputs:
   code-scanning:
     description: >-
       In diff mode, which findings the uploaded SARIF carries. "new" (default): only what this
-      pull request introduced — the findings the branch is answerable for, and the ones a reviewer
+      pull request introduced, the findings the branch is answerable for, and the ones a reviewer
       can act on. "all": every finding in the repository, which is what a full scan produces.
 
       Inert outside diff mode: a push has nothing to diff against, so its upload is always the
@@ -81,8 +86,8 @@ inputs:
   feeds:
     description: >-
       Fetch the exploitability datasets (CISA KEV, FIRST EPSS) into the runner's cache before
-      scanning: `draugr feeds update`. Set "true" when the Saga's `config.exploitability` — or
-      `--kev`/`--epss` — reads them with `cache`.
+      scanning: `draugr feeds update`. Set "true" when the Saga's `config.exploitability`, or
+      `--kev`/`--epss`, reads them with `cache`.
 
       Its own step on purpose, so a feed outage surfaces here rather than inside a scan. A
       fetch that fails keeps the cached copy and says how old it is; what this guards against is
@@ -96,19 +101,29 @@ inputs:
       results (e.g. `github` → code scanning). "diff": scan the pull request's base and head and
       upsert one sticky new/fixed comment (the Saga's publishers are suppressed so it never
       double-posts alongside code scanning). "auto" (default): pick "diff" on pull_request events
-      and "scan" otherwise — so a single workflow does the right thing on both push and PRs.
+      and "scan" otherwise, so a single workflow does the right thing on both push and PRs.
     required: false
     default: auto
   fail-on-new:
     description: >-
-      (diff mode) Fail the gate if a new finding is at or above this severity (error, warning,
-      note). Empty does not fail on new findings.
+      (diff mode) Fail the gate if the change introduces a finding at or above this, in either
+      vocabulary: a priority band (P1-P4) or a severity (critical, high, medium, low). Empty does
+      not fail on new findings.
     required: false
     default: ""
   fail-on-new-priority:
-    description: (diff mode) Fail the gate if a new finding is at or above this priority band (P1-P4).
+    description: >-
+      Deprecated: write the band in fail-on-new, which now takes either vocabulary.
     required: false
     default: ""
+  diff-view:
+    description: >-
+      (diff mode) What the pull-request comment says. "findings" (default) is a row per finding.
+      "actions" groups them into the things somebody would do, so six advisories in one library
+      are one upgrade. Which one a team wants is a property of how they review rather than of the
+      change, so it belongs here rather than on a run.
+    required: false
+    default: findings
 
 outputs:
   sarif:
@@ -214,7 +229,7 @@ runs:
             checksums.txt
         fi
 
-        # Verify the downloaded archive matches the (signed) checksums — always.
+        # Verify the downloaded archive matches the (signed) checksums, always.
         sha256sum --ignore-missing -c checksums.txt
 
         # Extract the draugr binary and put it on PATH for later steps.
@@ -259,7 +274,7 @@ runs:
         INPUT_CACHE_DIR: ${{ inputs.cache-dir }}
         # A pull request from a fork runs code the base repository has not reviewed. If that job
         # can *write* a shared cache, the fork decides what the next run on the default branch
-        # reads — a pass nobody earned, with nothing in the report to show for it.
+        # reads, a pass nobody earned, with nothing in the report to show for it.
         #
         # GitHub's own cache is already scoped so a fork cannot write the base branch's copy, but
         # a self-hosted runner, a bucket or a mounted volume is not, and the guarantee should not
@@ -302,7 +317,7 @@ runs:
         INPUT_CACHE_DIR: ${{ inputs.cache-dir }}
         # A pull request from a fork runs code the base repository has not reviewed. If that job
         # can *write* a shared cache, the fork decides what the next run on the default branch
-        # reads — a pass nobody earned, with nothing in the report to show for it.
+        # reads, a pass nobody earned, with nothing in the report to show for it.
         #
         # GitHub's own cache is already scoped so a fork cannot write the base branch's copy, but
         # a self-hosted runner, a bucket or a mounted volume is not, and the guarantee should not
@@ -314,6 +329,7 @@ runs:
         CACHE_READ_ONLY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'true' || '' }}
         INPUT_FAIL_ON_NEW: ${{ inputs.fail-on-new }}
         INPUT_FAIL_ON_NEW_PRIORITY: ${{ inputs.fail-on-new-priority }}
+        INPUT_DIFF_VIEW: ${{ inputs.diff-view }}
         INPUT_CODE_SCANNING: ${{ inputs.code-scanning }}
         INPUT_CODE_SCANNING_MIN_PRIORITY: ${{ inputs.code-scanning-min-priority }}
         INPUT_ARGS: ${{ inputs.args }}
@@ -332,7 +348,7 @@ runs:
 
         # The head scan describes the code under review, so it goes where `output` says and
         # where the `sarif` / `report` step outputs already point. Writing it to a temp
-        # directory instead would leave outputs.sarif naming a file deleted with the runner —
+        # directory instead would leave outputs.sarif naming a file deleted with the runner,
         # a caller's upload step would succeed and carry nothing. Only the base scan is
         # genuinely throwaway.
         base_out="${RUNNER_TEMP}/draugr-base"
@@ -360,6 +376,16 @@ runs:
         diff_args=("$base_out/results.sarif" "$head_out/results.sarif" --publish)
         [ -n "$INPUT_FAIL_ON_NEW" ]          && diff_args+=(--fail-on-new "$INPUT_FAIL_ON_NEW")
         [ -n "$INPUT_FAIL_ON_NEW_PRIORITY" ] && diff_args+=(--fail-on-new-priority "$INPUT_FAIL_ON_NEW_PRIORITY")
+        # Asked for rather than assumed, the same way --format sarif is below: `version` lets a
+        # caller pin any published release, and this tag moves independently of them, so the binary
+        # in front of us may predate the flag. Without it the comment is what it always was.
+        if [ -n "$INPUT_DIFF_VIEW" ] && [ "$INPUT_DIFF_VIEW" != "findings" ]; then
+          if draugr help diff 2>&1 | grep -q -- '--view'; then
+            diff_args+=(--view "$INPUT_DIFF_VIEW")
+          else
+            echo "::warning::diff-view needs a Draugr release with 'diff --view'; this one is older, so the comment lists findings."
+          fi
+        fi
         draugr diff "${diff_args[@]}"
 
         # What code scanning receives on a pull request. By default the findings this branch
@@ -369,7 +395,7 @@ runs:
         # Written beside the head scan rather than over it, so the complete report is still there
         # for an artifact upload and for the `report` output. Only the `sarif` output moves.
         # `version` lets a caller pin any published release, and this action tag moves
-        # independently of them — so the binary in front of us may predate `diff --format sarif`.
+        # independently of them, so the binary in front of us may predate `diff --format sarif`.
         # Asked rather than assumed, because the alternative is every pinned workflow failing at
         # the last step of a run that already did all its work.
         if [ "${INPUT_CODE_SCANNING:-new}" = "new" ]; then
@@ -381,8 +407,8 @@ runs:
             new_args=("$base_out/results.sarif" "$head_out/results.sarif" --format sarif)
             [ -n "$INPUT_CODE_SCANNING_MIN_PRIORITY" ] && new_args+=(--min-priority "$INPUT_CODE_SCANNING_MIN_PRIORITY")
             # Only what this repository's checkout can anchor. A Saga may describe several
-            # repositories — its own components, or ones a `fragments:` entry contributes from
-            # another project — and their paths are relative to themselves. Uploaded here, a
+            # repositories, its own components, or ones a `fragments:` entry contributes from
+            # another project, and their paths are relative to themselves. Uploaded here, a
             # finding from elsewhere annotates a same-named file in this repository, on a line
             # that does not have that problem. Not a setting: there is no case where that is
             # wanted. Findings belonging to no repository, like an image's, are unaffected.

@@ -5,6 +5,8 @@
 package scanpolicy
 
 import (
+	"slices"
+
 	"github.com/draugr-dev/draugr/internal/controllers"
 	"github.com/draugr-dev/draugr/pkg/engine"
 	"github.com/draugr-dev/draugr/pkg/exploit"
@@ -22,11 +24,21 @@ func DefaultPrioritizer(expl *exploit.Source) engine.Prioritizer {
 		sev := res.Severity(controllers.SeverityFloor(control))
 		// nil-safe: no-op when no source, and the escalation is nil unless something moved.
 		sev, esc := expl.Explain(sev, res.RuleID)
-		// Reachability ranks a finding down when nothing can reach it — but never one that
-		// exploitability just raised. Observed exploitation outranks a call graph's inability to
-		// find a path, for the same reason KEV outranks EPSS: one is a report of what is
-		// happening, the other a prediction about what could. Where both have something to say,
-		// the stronger claim of exposure wins.
+		// Reachability ranks a finding down when nothing can reach it, but never one that
+		// exploitability just raised.
+		//
+		// The asymmetry is confidence in a negative rather than observation against prediction.
+		// An unreachable verdict is an absence claim: it says analysis found no route today, on one
+		// revision, and reflection, dynamic dispatch and code generation all defeat a call graph.
+		// The route appears the day somebody writes the call. A wrong absence claim costs most
+		// exactly where the flaw is one people are already exploiting, so "we could not find a
+		// path" does not overturn "this is being used".
+		//
+		// Not the reason KEV outranks EPSS, which is a different comparison. Those two answer the
+		// same question, is this being exploited, and the one that observed it beats the one that
+		// predicted it. This pair answers two questions about two subjects: exploitation is about
+		// the world, reachability is about this codebase, and neither is automatically the stronger
+		// claim. What decides it is which claim is easier to be wrong about.
 		var rankedAs sarif.Severity
 		if esc == nil {
 			if lowered := res.Reachability.RankAt(sev); lowered != sev {
@@ -57,21 +69,35 @@ func DefaultPrioritizer(expl *exploit.Source) engine.Prioritizer {
 //
 // Here rather than beside either caller for the reason in the package doc. A verdict is the
 // answer Draugr exists to give, and one entry point applying the descriptor's gate while another
-// applied a fixed default would have an agent and CI disagree about the same descriptor — with
+// applied a fixed default would have an agent and CI disagree about the same descriptor. With
 // nothing in either answer to show which policy produced it.
 //
-// Validation has already rejected anything that is neither a band nor one of the SARIF levels
-// still accepted, so an unparseable value cannot reach here; it is dropped rather than becoming a
-// threshold nobody chose.
-func GateThresholds(g *saga.GateConfig) map[string]sarif.Severity {
+// Validation has already refused a per-control threshold in the other vocabulary from the gate, so
+// the two maps are never both populated and a value that parses as neither cannot reach here.
+//
+// Returned as two maps because a threshold only means something in the vocabulary its gate asks
+// in. Parsing every value as a severity and keeping what survived silently discarded a band, which
+// is the whole per-control block on a band gate, and a band gate is the default.
+func GateThresholds(g *saga.GateConfig) (map[string]sarif.Severity, map[string]string) {
 	if g == nil || len(g.Controls) == 0 {
-		return nil
+		return nil, nil
 	}
-	out := make(map[string]sarif.Severity, len(g.Controls))
+	severities := map[string]sarif.Severity{}
+	bands := map[string]string{}
 	for control, want := range g.Controls {
+		if slices.Contains(saga.Priorities, want) {
+			bands[control] = want
+			continue
+		}
 		if sev, err := sarif.ParseSeverity(want); err == nil {
-			out[control] = sev
+			severities[control] = sev
 		}
 	}
-	return out
+	if len(severities) == 0 {
+		severities = nil
+	}
+	if len(bands) == 0 {
+		bands = nil
+	}
+	return severities, bands
 }

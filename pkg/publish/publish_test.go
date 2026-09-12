@@ -1,6 +1,7 @@
 package publish
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ func sampleData() report.Data {
 		}}},
 	}}
 	verdict := norn.Result{Verdict: norn.Fail}
-	return report.Data{Release: saga.Release{Name: "app", Version: "1.0"}, Run: run, Verdict: verdict}
+	return report.Data{Release: saga.Release{Version: "1.0"}, Run: run, Verdict: verdict}
 }
 
 func TestForKnownAndUnknown(t *testing.T) {
@@ -57,8 +58,9 @@ func TestKinds(t *testing.T) {
 func TestRunWritesReports(t *testing.T) {
 	dir := t.TempDir()
 	err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "json"}, {Format: "sarif"}, {Format: "markdown"}},
-		[]saga.PublisherConfig{{Kind: "file", Dir: dir}},
+		[]saga.PublisherConfig{{Kind: "file", Dir: dir, Reports: []saga.ReportConfig{
+			{Format: "json"}, {Format: "sarif"}, {Format: "markdown"},
+		}}},
 		sampleData(),
 	)
 	if err != nil {
@@ -72,7 +74,7 @@ func TestRunWritesReports(t *testing.T) {
 }
 
 func TestRunNoPublishersIsNoop(t *testing.T) {
-	if err := Run(context.Background(), []saga.ReportConfig{{Format: "json"}}, nil, sampleData()); err != nil {
+	if err := Run(context.Background(), nil, sampleData()); err != nil {
 		t.Errorf("no publishers should be a no-op, got %v", err)
 	}
 }
@@ -80,8 +82,7 @@ func TestRunNoPublishersIsNoop(t *testing.T) {
 func TestRunUnknownFormatErrors(t *testing.T) {
 	dir := t.TempDir()
 	err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "bogus"}},
-		[]saga.PublisherConfig{{Kind: "file", Dir: dir}},
+		[]saga.PublisherConfig{{Kind: "file", Dir: dir, Reports: []saga.ReportConfig{{Format: "bogus"}}}},
 		sampleData(),
 	)
 	if err == nil {
@@ -91,8 +92,7 @@ func TestRunUnknownFormatErrors(t *testing.T) {
 
 func TestRunUnknownPublisherErrors(t *testing.T) {
 	err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "json"}},
-		[]saga.PublisherConfig{{Kind: "bogus"}},
+		[]saga.PublisherConfig{{Kind: "bogus", Reports: []saga.ReportConfig{{Format: "json"}}}},
 		sampleData(),
 	)
 	if err == nil {
@@ -107,8 +107,7 @@ func TestRunPublisherErrorSurfaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "json"}},
-		[]saga.PublisherConfig{{Kind: "file", Dir: filepath.Join(bad, "sub")}}, // parent is a file
+		[]saga.PublisherConfig{{Kind: "file", Dir: filepath.Join(bad, "sub"), Reports: []saga.ReportConfig{{Format: "json"}}}}, // parent is a file
 		sampleData(),
 	)
 	if err == nil {
@@ -127,8 +126,7 @@ func TestRunDeliversSBOMsAlongsideReports(t *testing.T) {
 	}
 
 	err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "sarif"}},
-		[]saga.PublisherConfig{{Kind: "file", Dir: dir}},
+		[]saga.PublisherConfig{{Kind: "file", Dir: dir, Reports: []saga.ReportConfig{{Format: "sarif"}}}},
 		d,
 	)
 	if err != nil {
@@ -152,7 +150,7 @@ func TestRunDeliversSBOMsEvenWithNoReportsConfigured(t *testing.T) {
 	d := sampleData()
 	d.Run.SBOMs = []sbom.Document{{Component: "web", Target: "r", Format: saga.SBOMSPDXJSON, Bytes: []byte("{}")}}
 
-	if err := Run(context.Background(), nil, []saga.PublisherConfig{{Kind: "file", Dir: dir}}, d); err != nil {
+	if err := Run(context.Background(), []saga.PublisherConfig{{Kind: "file", Dir: dir}}, d); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sbom-web-r.spdx.json")); err != nil {
@@ -160,10 +158,10 @@ func TestRunDeliversSBOMsEvenWithNoReportsConfigured(t *testing.T) {
 	}
 }
 
-// A publisher delivers the record, so it gets the whole record. GitHub code scanning resolves
-// any alert absent from an upload as fixed — so if --min-priority reached a publisher, running
-// a scan with the flag would quietly close every finding below the band, in the one place the
-// filtering is invisible.
+// A publisher delivers the record, so it gets the whole record. GitHub code scanning resolves any
+// alert absent from an upload as fixed, so if --min-priority reached a publisher, running a scan
+// with the flag would quietly close every finding below the band, in the one place the filtering is
+// invisible.
 //
 // This is the guard for that. It asserts on delivered bytes rather than on the flag, because the
 // flag being cleared is an implementation detail and the alerts being closed is the harm.
@@ -180,8 +178,7 @@ func TestPublishersIgnoreMinPriority(t *testing.T) {
 
 	dir := t.TempDir()
 	if err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "sarif"}},
-		[]saga.PublisherConfig{{Kind: "file", Dir: dir}},
+		[]saga.PublisherConfig{{Kind: "file", Dir: dir, Reports: []saga.ReportConfig{{Format: "sarif"}}}},
 		data,
 	); err != nil {
 		t.Fatal(err)
@@ -192,7 +189,7 @@ func TestPublishersIgnoreMinPriority(t *testing.T) {
 	}
 	for _, want := range []string{"CVE-P1", "CVE-P4"} {
 		if !strings.Contains(string(got), want) {
-			t.Errorf("published SARIF is missing %s — a filtered upload resolves it as fixed:\n%s", want, got)
+			t.Errorf("published SARIF is missing %s, a filtered upload resolves it as fixed:\n%s", want, got)
 		}
 	}
 }
@@ -202,8 +199,7 @@ func TestRunDoesNotClearTheCallersMinPriority(t *testing.T) {
 	data := sampleData()
 	data.MinPriority = "P2"
 	if err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "json"}},
-		[]saga.PublisherConfig{{Kind: "file", Dir: t.TempDir()}},
+		[]saga.PublisherConfig{{Kind: "file", Dir: t.TempDir(), Reports: []saga.ReportConfig{{Format: "json"}}}},
 		data,
 	); err != nil {
 		t.Fatal(err)
@@ -216,14 +212,13 @@ func TestRunDoesNotClearTheCallersMinPriority(t *testing.T) {
 // One format that cannot render must not cost the ones that can.
 //
 // A scan that took four minutes used to produce no evidence at all because of a typo a descriptor
-// check catches in milliseconds — Run returned on the first failed render, before any publisher saw
+// check catches in milliseconds. Run returned on the first failed render, before any publisher saw
 // anything. The destination loop has always tolerated one failure; this is the same reasoning one
 // step earlier.
 func TestRunDeliversTheReportsThatRendered(t *testing.T) {
 	dir := t.TempDir()
 	err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "json"}, {Format: "no-such-format"}, {Format: "sarif"}},
-		[]saga.PublisherConfig{{Kind: "file", Dir: dir}},
+		[]saga.PublisherConfig{{Kind: "file", Dir: dir, Reports: []saga.ReportConfig{{Format: "json"}, {Format: "no-such-format"}, {Format: "sarif"}}}},
 		sampleData())
 
 	if err == nil {
@@ -244,8 +239,7 @@ func TestRunDeliversTheReportsThatRendered(t *testing.T) {
 func TestRunReportsEveryFailureWhenNothingRendered(t *testing.T) {
 	dir := t.TempDir()
 	err := Run(context.Background(),
-		[]saga.ReportConfig{{Format: "nope-one"}, {Format: "nope-two"}},
-		[]saga.PublisherConfig{{Kind: "file", Dir: dir}},
+		[]saga.PublisherConfig{{Kind: "file", Dir: dir, Reports: []saga.ReportConfig{{Format: "nope-one"}, {Format: "nope-two"}}}},
 		sampleData())
 
 	if err == nil {
@@ -259,5 +253,164 @@ func TestRunReportsEveryFailureWhenNothingRendered(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 0 {
 		t.Errorf("nothing rendered, so nothing should have been written: %v", entries)
+	}
+}
+
+// A publisher that needs a format and does not say so goes back to reporting it at delivery time,
+// which is after every scanner has run. Nothing about that looks wrong until somebody spends a
+// pipeline on it.
+func TestEveryPublisherSaysWhatItRenders(t *testing.T) {
+	for _, kind := range Kinds() {
+		if _, ok := rendered[kind]; !ok {
+			t.Errorf("%s has no entry in rendered. Name the formats it produces for itself, or "+
+				"nil where it has none of its own and an author has to say", kind)
+		}
+	}
+	for kind := range rendered {
+		if _, ok := builders[kind]; !ok {
+			t.Errorf("rendered names %q, which is not a publisher this build has", kind)
+		}
+	}
+	// Every named format must be one something renders, or the check built on this asks for a
+	// report that cannot exist.
+	renderable := map[string]bool{}
+	for _, f := range report.Formats() {
+		renderable[f] = true
+	}
+	for kind, formats := range rendered {
+		for _, f := range formats {
+			if !renderable[f] {
+				t.Errorf("%s renders %q, which is not a format Draugr can produce", kind, f)
+			}
+		}
+	}
+}
+
+func TestRendersIsQuietAboutAKindWeDoNotHave(t *testing.T) {
+	if got := Renders("jira"); got != nil {
+		t.Errorf("Renders of an unknown kind = %v, want nil", got)
+	}
+}
+
+// A destination that says nothing about what tells it apart from another of its kind cannot be
+// checked for being written twice, and a duplicate is written identically to a deliberate pair.
+func TestEveryPublisherSaysWhatDistinguishesIt(t *testing.T) {
+	for _, kind := range Kinds() {
+		field, ok := distinguishes[kind]
+		if !ok || field == "" {
+			t.Errorf("%s has no entry in distinguishes. Name the field that makes a second entry "+
+				"of this kind a second destination", kind)
+		}
+	}
+	for kind := range distinguishes {
+		if _, ok := builders[kind]; !ok {
+			t.Errorf("distinguishes names %q, which is not a publisher this build has", kind)
+		}
+	}
+	// Every named field has to be one DistinguishingValue can read, or the check compares two
+	// empty strings and calls every pair a duplicate.
+	for kind, field := range distinguishes {
+		cfg := saga.PublisherConfig{Kind: kind}
+		switch field {
+		case "dir":
+			cfg.Dir = "x"
+		case "repo":
+			cfg.Repo = "x"
+		case "marker":
+			cfg.Marker = "x"
+		case "url":
+			cfg.URL = "x"
+		default:
+			t.Errorf("%s is distinguished by %q, which DistinguishingValue cannot read", kind, field)
+			continue
+		}
+		if got := DistinguishingValue(cfg); got != "x" {
+			t.Errorf("%s: DistinguishingValue read %q from its %s", kind, got, field)
+		}
+	}
+}
+
+// The shape the two lists could not express: write HTML and JSON to a directory, post the markdown
+// somewhere else. Every destination used to be handed everything and left to pick out what it
+// recognized, so "this file is for the directory and that one is for the comment" had nowhere to be
+// said.
+func TestADestinationIsHandedWhatItAskedFor(t *testing.T) {
+	full, narrowed := t.TempDir(), t.TempDir()
+	err := Run(context.Background(),
+		[]saga.PublisherConfig{
+			{Kind: "file", Dir: full, Reports: []saga.ReportConfig{{Format: "html"}, {Format: "json"}}},
+			{Kind: "file", Dir: narrowed, Reports: []saga.ReportConfig{{Format: "markdown"}}},
+		},
+		sampleData(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"report.html", "report.json"} {
+		if _, err := os.Stat(filepath.Join(full, f)); err != nil {
+			t.Errorf("the directory that asked for %s did not get it: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(full, "report.md")); err == nil {
+		t.Error("the directory asked for html and json and was given the markdown as well")
+	}
+	if _, err := os.Stat(filepath.Join(narrowed, "report.md")); err != nil {
+		t.Errorf("the directory that asked for markdown did not get it: %v", err)
+	}
+	for _, f := range []string{"report.html", "report.json"} {
+		if _, err := os.Stat(filepath.Join(narrowed, f)); err == nil {
+			t.Errorf("the markdown-only directory was given %s", f)
+		}
+	}
+}
+
+// A destination that names no reports keeps taking every one, which is what a descriptor written
+// before this meant and still means.
+func TestADestinationThatNamesNothingTakesEverything(t *testing.T) {
+	dir := t.TempDir()
+	err := Run(context.Background(),
+		[]saga.PublisherConfig{{Kind: "file", Dir: dir, Reports: []saga.ReportConfig{
+			{Format: "json"}, {Format: "markdown"},
+		}}},
+		sampleData(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"report.json", "report.md"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("expected %s: %v", f, err)
+		}
+	}
+}
+
+// One document however many destinations ask for it. Rendering is the expensive half and the
+// reason the split is worth keeping inside, now that the descriptor no longer makes an author hold
+// it.
+func TestOneReportIsRenderedOnceForEveryDestinationAskingForIt(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	data := sampleData()
+
+	// Counting renders directly is not available from here, so the observable stands in: two
+	// destinations asking for one format produce identical bytes, which a second render of a
+	// report carrying a timestamp would not.
+	err := Run(context.Background(),
+		[]saga.PublisherConfig{
+			{Kind: "file", Dir: a, Reports: []saga.ReportConfig{{Format: "json"}}},
+			{Kind: "file", Dir: b, Reports: []saga.ReportConfig{{Format: "json"}}},
+		}, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(filepath.Join(a, "report.json")) // #nosec G304 -- a directory this test made
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(filepath.Join(b, "report.json")) // #nosec G304 -- a directory this test made
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Error("two destinations asking for one report were given two different documents")
 	}
 }

@@ -47,7 +47,7 @@ func TestCheckedInSchemaIsUpToDate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(current) != string(regenerated) {
-		t.Error("the checked-in schema is not what the registry would generate — run `go generate ./pkg/saga/...`\n" +
+		t.Error("the checked-in schema is not what the registry would generate. Run `go generate ./pkg/saga/...`\n" +
 			"This is the drift that let the schema fall two controls behind the registry: an editor " +
 			"rejected descriptors Draugr accepted, including Draugr's own self-scan.")
 	}
@@ -83,7 +83,7 @@ func TestSchemaListsEveryRegisteredControl(t *testing.T) {
 		registered[info.Name] = true
 		desc, ok := inSchema[info.Name]
 		if !ok {
-			t.Errorf("control %q is registered but absent from the schema — an editor will reject "+
+			t.Errorf("control %q is registered but absent from the schema, an editor will reject "+
 				"a descriptor that enables it", info.Name)
 			continue
 		}
@@ -95,7 +95,7 @@ func TestSchemaListsEveryRegisteredControl(t *testing.T) {
 	}
 	for name := range inSchema {
 		if !registered[name] {
-			t.Errorf("schema offers control %q, which no controller serves — autocompleting a name "+
+			t.Errorf("schema offers control %q, which no controller serves, autocompleting a name "+
 				"that fails at scan time is worse than not offering it", name)
 		}
 	}
@@ -139,7 +139,7 @@ func TestEmbeddedSchemaMatchesTheFileOnDisk(t *testing.T) {
 
 func TestSchemaAllowsEveryEffectKind(t *testing.T) {
 	// An enum written out beside the taxonomy drifts from it the moment a kind is added, and the
-	// schema then rejects a value the binary accepts — an editor disagreeing with Draugr about a
+	// schema then rejects a value the binary accepts, an editor disagreeing with Draugr about a
 	// descriptor that is valid. Same failure the generated control names exist to prevent.
 	data, err := os.ReadFile(schemaPath())
 	if err != nil {
@@ -182,9 +182,66 @@ func TestSchemaAllowsEveryEffectKind(t *testing.T) {
 	}
 }
 
+// TestSchemaOffersEveryReachabilityAnalyzer holds the schema to the registry the planner reads.
+//
+// The other way around from the effect kinds and the control names: this one said `type: string`
+// and accepted anything, while the loader refuses a name no scanner answers to and suggests the
+// nearest one. An editor that accepts what Draugr rejects is the same disagreement, and it teaches
+// somebody the name is fine until CI says otherwise.
+func TestSchemaOffersEveryReachabilityAnalyzer(t *testing.T) {
+	data, err := os.ReadFile(schemaPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	defs := doc["$defs"].(map[string]any)
+	rch := defs["reachabilityConfig"].(map[string]any)
+	props := rch["properties"].(map[string]any)
+	analyzers := props["analyzers"].(map[string]any)
+	items, ok := analyzers["items"].(map[string]any)
+	if !ok {
+		t.Fatal("analyzers has no items shape")
+	}
+	raw, ok := items["enum"].([]any)
+	if !ok {
+		t.Fatal("analyzers accepts any string again, so an editor cannot flag a typo")
+	}
+	got := map[string]bool{}
+	for _, v := range raw {
+		got[v.(string)] = true
+	}
+
+	want := map[string]bool{}
+	for _, sc := range builtins.Registry().Scanners() {
+		if info := sc.Info(); info.Reachability {
+			want[info.Name] = true
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("no scanner declares Reachability, so this test is checking nothing")
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("%q decides reachability and the schema will not let a descriptor name it", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("the schema offers %q, which no scanner in this build answers to", name)
+		}
+	}
+	// Naming one twice enables nothing extra, so it is a typo rather than an intention.
+	if analyzers["uniqueItems"] != true {
+		t.Error("analyzers no longer requires unique items")
+	}
+}
+
 // The fragment schema is derived from the Saga's, so it can only be right if it is regenerated
-// whenever that one changes. Drift here shows up as an editor rejecting a fragment Draugr
-// accepts — the same class of problem the Saga's own guard exists to catch.
+// whenever that one changes. Drift here shows up as an editor rejecting a fragment Draugr accepts,
+// the same class of problem the Saga's own guard exists to catch.
 func TestCheckedInFragmentSchemaIsUpToDate(t *testing.T) {
 	saga, err := os.ReadFile(schemaPath())
 	if err != nil {
@@ -203,7 +260,7 @@ func TestCheckedInFragmentSchemaIsUpToDate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(got) != string(want) {
-		t.Error("the checked-in fragment schema is not what the generator would produce — " +
+		t.Error("the checked-in fragment schema is not what the generator would produce, " +
 			"run `go generate ./pkg/saga/...`")
 	}
 }
@@ -230,7 +287,7 @@ func TestSchemaCompletesScannerBlocks(t *testing.T) {
 	}
 
 	// The option list has to come from the scanner's own schema, or what an editor offers and what
-	// the engine accepts drift — and the drift surfaces as a rejected descriptor, not a warning.
+	// the engine accepts drift, and the drift surfaces as a rejected descriptor, not a warning.
 	gosec := props["gosec"].(map[string]any)["properties"].(map[string]any)
 	for _, opt := range []string{"enabled", "include", "exclude", "tags"} {
 		if _, ok := gosec[opt]; !ok {
@@ -323,8 +380,8 @@ func enumAt(t *testing.T, path ...string) []string {
 // quiet: an editor marks a descriptor red that Draugr loads without complaint, or accepts one it
 // rejects. Nothing else notices, because the schema is a data file that no Go code reads.
 //
-// The generated parts already have this guarantee — see the fragment and registry tests above.
-// This is the same guarantee for the parts a person maintains, which are the ones that drift.
+// The generated parts already have this guarantee. See the fragment and registry tests above. This
+// is the same guarantee for the parts a person maintains, which are the ones that drift.
 func TestHandWrittenEnumsMatchTheirSource(t *testing.T) {
 	t.Parallel()
 
@@ -346,11 +403,19 @@ func TestHandWrittenEnumsMatchTheirSource(t *testing.T) {
 			want: saga.Priorities,
 		},
 		{
-			// Bands first, then the SARIF levels still accepted for descriptors written against
-			// the older vocabulary. Both are valid, so both belong here.
+			// One threshold in either vocabulary: a priority band, or a severity. Plus the SARIF
+			// levels still accepted for descriptors written against the older words, the schema
+			// must not be stricter than the loader, which is the same failure as being looser,
+			// arrived at from the other side.
 			name: "gate thresholds",
 			path: []string{"gateConfig", "properties", "controls", "additionalProperties"},
-			want: append(append([]string{}, sarif.Severities...), "error", "warning", "note"),
+			want: gateVocabulary(),
+		},
+		{
+			// The same set, because one run asks one question and `controls` refines `failOn`.
+			name: "the gate itself",
+			path: []string{"gateConfig", "properties", "failOn"},
+			want: gateVocabulary(),
 		},
 		{
 			name: "exposure",
@@ -401,4 +466,15 @@ func criticalityStrings() []string {
 		out = append(out, string(c))
 	}
 	return out
+}
+
+// gateVocabulary is everything a gate threshold may be written as: a priority band, a severity, or
+// one of the SARIF levels a gate used to take. Built from the Go values rather than listed, so a
+// band or a severity added to either is a schema this test fails until it is updated.
+func gateVocabulary() []string {
+	out := append([]string{}, saga.Priorities...)
+	for _, s := range sarif.Severities {
+		out = append(out, string(s))
+	}
+	return append(out, "error", "warning", "note")
 }

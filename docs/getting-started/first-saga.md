@@ -1,19 +1,19 @@
 ---
 title: Write your first Saga
-description: A gentle walkthrough of authoring draugr.saga.yaml — release, controls, and components.
+description: A gentle walkthrough of authoring draugr.saga.yaml, release, controls, and components.
 section: Getting started
 order: 30
 ---
 
 # Write your first Saga
 
-The **Saga** (`draugr.saga.yaml`) is Draugr's descriptor — a declarative account of an
-application's security surface and the controls that must pass. This page walks you from a
-one-component file to a classified, multi-control descriptor. For the exhaustive field list,
-see the [Saga schema](../reference/saga-schema.md).
+The **Saga** (`draugr.saga.yaml`) is Draugr's descriptor, a declarative account of an application's
+security surface and the controls that must pass. This page walks you from a one-component file to a
+classified, multi-control descriptor. For the exhaustive field list, see the [Saga
+schema](../reference/saga-schema.md).
 
 > **Shortcut:** `draugr init` scaffolds this file for you, detecting your stack (Go, a
-> Dockerfile, dependency manifests) to pre-fill sensible controls — a good starting point to
+> Dockerfile, dependency manifests) to pre-fill sensible controls, a good starting point to
 > edit. And if you just want a scan now, `draugr scan .` needs no Saga at all.
 
 ## The smallest thing that runs
@@ -26,7 +26,7 @@ project: my-app
 release:
   version: "1.0"
 config:
-  controllers:
+  controls:
     images:
       enabled: true
 components:
@@ -35,17 +35,17 @@ components:
       - image: alpine:3.19
 ```
 
-Run it with `draugr scan draugr.saga.yaml`. A control only runs when it is **enabled** —
-globally under `config.controllers`, or on an individual component.
+Run it with `draugr scan draugr.saga.yaml`. A control only runs when it is **enabled**, globally
+under `config.controls`, or on an individual component.
 
 ## Add more of your surface
 
-Each component is one logical part of your app. List whatever applies — repositories, images,
-hosts, infrastructure — and enable the controls that should cover it:
+Each component is one logical part of your app. List whatever applies, repositories, images, hosts,
+infrastructure, and enable the controls that should cover it:
 
 ```yaml
 config:
-  controllers:
+  controls:
     images:  { enabled: true }
     sca:     { enabled: true }   # dependency scanning
     secrets: { enabled: true }   # leaked-credential detection
@@ -56,7 +56,7 @@ components:
         revision: main
     images:
       - image: registry.example.com/acme/web:1.0
-        digest: sha256:…            # optional — pin the immutable content digest
+        digest: sha256:…            # optional. Pin the immutable content digest
 ```
 
 A repository scan needs `git` on your `PATH`; an image scan needs Trivy. Run
@@ -67,14 +67,14 @@ whether anything is set to look at what you just declared. A descriptor that nam
 the `images` control is off scans clean over them, and a first Saga is exactly where that happens:
 
 ```
-Not checked:
-      web declares images, and images is not enabled
+NOT CHECKED
+  web images  1 control off: images
 ```
 
 ## Classify components so priority means something
 
-Two optional attributes turn a wall of findings into a ranked list — `exposure` (how
-reachable the component is) and `criticality` (the business impact if it fails):
+Two optional attributes turn a wall of findings into a ranked list, `exposure` (how reachable the
+component is) and `criticality` (the business impact if it fails):
 
 ```yaml
 components:
@@ -85,9 +85,10 @@ components:
       - image: registry.example.com/acme/web:1.0
 ```
 
-Draugr combines these with each finding's severity to assign a **P1–P4** priority — see
+Draugr combines these with each finding's severity to assign a **P1–P4** priority. See
 [prioritization](../concepts/prioritization.md). You can set them by hand, or let the guided
-[`draugr classify`](../reference/cli.md#draugr-classify-sagayaml--directory) wizard write them for you.
+[`draugr classify`](../reference/cli.md#draugr-classify-sagayaml--directory) wizard write them for
+you.
 
 ## Reference environment variables, not secrets
 
@@ -102,8 +103,8 @@ release:
 
 ## Next steps
 
-- [Quickstart](quickstart.md) — scan the Saga and read the verdict.
-- [Saga schema](../reference/saga-schema.md) — every field, including `config.reports`,
+- [Quickstart](quickstart.md). Scan the Saga and read the verdict.
+- [Saga schema](../reference/saga-schema.md), every field, including `config.publishers`,
   `config.publishers`, and `references`.
-- [Let discovery write it for you](../concepts/surveyors.md) — surveyors can generate the
+- [Let discovery write it for you](../concepts/surveyors.md). Surveyors can generate the
   descriptor from a cluster or GitHub org.

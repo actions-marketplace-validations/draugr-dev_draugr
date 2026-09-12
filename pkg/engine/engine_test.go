@@ -54,7 +54,7 @@ type fakeController struct {
 	scope    plugin.Scope
 	scanner  string
 	planFail bool
-	// digest, when set, pins the planned image target — which is what makes its cache entry
+	// digest, when set, pins the planned image target. Which is what makes its cache entry
 	// content-addressed. Empty plans a tag alone, as most descriptors do.
 	digest string
 }
@@ -89,7 +89,7 @@ func (c fakeController) Aggregate(reports []sarif.Report) (plugin.ControlResult,
 func model() saga.Model {
 	return saga.Model{
 		Release: saga.Release{Version: "1"},
-		Config: saga.Config{Controllers: map[string]saga.ControllerSettings{
+		Config: saga.Config{Controls: map[string]saga.ControllerSettings{
 			"images": {"enabled": true},
 			"infra":  {"enabled": true},
 		}},
@@ -105,7 +105,7 @@ func TestWithPrioritizationStampsFindings(t *testing.T) {
 	reg.RegisterScanner(&fakeScanner{name: "s"})
 	m := saga.Model{
 		Release:    saga.Release{Version: "1"},
-		Config:     saga.Config{Controllers: map[string]saga.ControllerSettings{"images": {"enabled": true}}},
+		Config:     saga.Config{Controls: map[string]saga.ControllerSettings{"images": {"enabled": true}}},
 		Components: []saga.Component{{Name: "a", Exposure: saga.ExposurePublic, Criticality: saga.CriticalityCritical}},
 	}
 	// The prioritizer receives the component's classification and the control name.
@@ -320,9 +320,9 @@ func TestRunAttributesScanErrorsToTheirControl(t *testing.T) {
 	reg.RegisterScanner(&fakeScanner{name: "broken", fail: true})
 
 	res, err := New(reg).Run(context.Background(), saga.Model{
-		Release: saga.Release{Name: "app", Version: "1"},
+		Release: saga.Release{Version: "1"},
 		Components: []saga.Component{
-			{Name: "c", Controllers: map[string]saga.ControllerSettings{"sca": {}}},
+			{Name: "c", Controls: map[string]saga.ControllerSettings{"sca": {}}},
 		},
 	})
 	if err == nil {
@@ -347,9 +347,9 @@ func TestRunReportsNoScanErrorsOnSuccess(t *testing.T) {
 	reg.RegisterController(fakeController{name: "sca", scope: plugin.ScopeComponent, scanner: "ok"})
 	reg.RegisterScanner(&fakeScanner{name: "ok"})
 	res, err := New(reg).Run(context.Background(), saga.Model{
-		Release: saga.Release{Name: "app", Version: "1"},
+		Release: saga.Release{Version: "1"},
 		Components: []saga.Component{
-			{Name: "c", Controllers: map[string]saga.ControllerSettings{"sca": {}}},
+			{Name: "c", Controls: map[string]saga.ControllerSettings{"sca": {}}},
 		},
 	})
 	if err != nil {
@@ -361,13 +361,13 @@ func TestRunReportsNoScanErrorsOnSuccess(t *testing.T) {
 }
 
 // The hole this closes: a descriptor that enables no control produced no findings, no failures,
-// and a PASS — identical output to a spotless application. The wrong reading is far more likely,
+// and a PASS, identical output to a spotless application. The wrong reading is far more likely,
 // since a descriptor reaches that state by being unfinished or by being generated from discovery.
 func TestRunReportsThatNothingWasChecked(t *testing.T) {
 	t.Parallel()
 
 	model := saga.Model{
-		Release:    saga.Release{Name: "app", Version: "1.0"},
+		Release:    saga.Release{Version: "1.0"},
 		Components: []saga.Component{{Name: "web", Repositories: []saga.Repository{{URL: "https://example.test/x.git"}}}},
 	}
 	res, err := New(NewRegistry()).Run(context.Background(), model)
@@ -388,14 +388,14 @@ func TestRunReportsThatNothingWasChecked(t *testing.T) {
 	}
 }
 
-// A descriptor that asks only for an SBOM enables no control and plans no job, but it does
-// produce the evidence it was asked for — so it has done what it said, and must not be reported
-// as having checked nothing.
+// A descriptor that asks only for an SBOM enables no control and plans no job, but it does produce
+// the evidence it was asked for. So it has done what it said, and must not be reported as having
+// checked nothing.
 func TestRunDoesNotComplainAboutAnSBOMOnlyDescriptor(t *testing.T) {
 	t.Parallel()
 
 	model := saga.Model{
-		Release:    saga.Release{Name: "app", Version: "1.0"},
+		Release:    saga.Release{Version: "1.0"},
 		Config:     saga.Config{SBOM: &saga.SBOMConfig{Enabled: true}},
 		Components: []saga.Component{{Name: "web", Repositories: []saga.Repository{{URL: "https://example.test/x.git"}}}},
 	}
@@ -484,8 +484,8 @@ func TestRecordProvenanceAugmentsWhatTheScannerSaid(t *testing.T) {
 }
 
 // A finding has to say which component it belongs to. A location alone is ambiguous the moment a
-// descriptor has two, and it is what makes the priority checkable — the band is computed from
-// that component's declared classification.
+// descriptor has two, and it is what makes the priority checkable. The band is computed from that
+// component's declared classification.
 func TestFindingsCarryTheirComponent(t *testing.T) {
 	t.Parallel()
 
@@ -535,8 +535,8 @@ func TestWithoutPrewarmSkipsWarmingButStillScans(t *testing.T) {
 	if offline.warms != 0 {
 		t.Errorf("prewarmed %d times while offline", offline.warms)
 	}
-	// The scan itself must still happen against whatever is on disk. Skipping the warm-up is
-	// not skipping the run — an earlier version of this cleared the wrong slice and did both.
+	// The scan itself must still happen against whatever is on disk. Skipping the warm-up is not
+	// skipping the run, an earlier version of this cleared the wrong slice and did both.
 	if offline.calls() == 0 {
 		t.Error("no scans ran; the run was skipped rather than the warm-up")
 	}
@@ -559,8 +559,8 @@ func TestWithCacheableTargetVetoesAJob(t *testing.T) {
 	sc := &fakeScanner{name: "s"}
 	reg.RegisterScanner(sc)
 
-	// Reject everything: the scan still runs, and nothing is stored — a vetoed target behaves
-	// exactly as though caching were off.
+	// Reject everything: the scan still runs, and nothing is stored, a vetoed target behaves exactly
+	// as though caching were off.
 	c := cache.NewMemory()
 	if _, err := New(reg, WithCache(c), WithCacheableTarget(func(plugin.Target) bool { return false })).
 		Run(context.Background(), model()); err != nil {
@@ -726,8 +726,8 @@ func TestProgressDescribesTheRunAsItGoes(t *testing.T) {
 
 // Credentials must never reach a log, and a target is where they arrive from.
 //
-// A CI runner writes a token straight into the checkout's git remote — GitLab uses
-// `https://gitlab-ci-token:<token>@host/...` — so a repository target carries one whether or not
+// A CI runner writes a token straight into the checkout's git remote, GitLab uses
+// `https://gitlab-ci-token:<token>@host/...`. So a repository target carries one whether or not
 // the descriptor mentioned it. Formatting the target for a debug line printed it.
 func TestPlanningNeverLogsCredentials(t *testing.T) {
 	const secret = "glpat-NOTAREALTOKEN0123456789" // #nosec G101 -- a fabricated value, which is the point
@@ -753,9 +753,9 @@ func TestPlanningNeverLogsCredentials(t *testing.T) {
 	}
 }
 
-// TestUnpinnedCacheHitsAreRecorded covers the difference between a cache that is right and a
-// cache that only looks right. A tag-only image has a stable key and unstable bytes, so a hit on
-// one is an assumption — and the run has to say which results rest on it.
+// TestUnpinnedCacheHitsAreRecorded covers the difference between a cache that is right and a cache
+// that only looks right. A tag-only image has a stable key and unstable bytes, so a hit on one is
+// an assumption. And the run has to say which results rest on it.
 func TestUnpinnedCacheHitsAreRecorded(t *testing.T) {
 	run := func(t *testing.T, digest string) Result {
 		t.Helper()
@@ -770,8 +770,8 @@ func TestUnpinnedCacheHitsAreRecorded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Nothing was reused, so nothing rests on the assumption yet — a fresh scan of a tag
-		// scanned whatever that tag points at now, which is the right answer either way.
+		// Nothing was reused, so nothing rests on the assumption yet, a fresh scan of a tag scanned
+		// whatever that tag points at now, which is the right answer either way.
 		if len(first.Stats.UnpinnedCacheHits) != 0 {
 			t.Errorf("a run that stored the entries reported %v as reused", first.Stats.UnpinnedCacheHits)
 		}
@@ -789,7 +789,7 @@ func TestUnpinnedCacheHitsAreRecorded(t *testing.T) {
 		got := run(t, "")
 		want := []string{"a", "b"}
 		if !slices.Equal(got.Stats.UnpinnedCacheHits, want) {
-			t.Errorf("UnpinnedCacheHits = %v, want %v — both components' images were reused from "+
+			t.Errorf("UnpinnedCacheHits = %v, want %v, both components' images were reused from "+
 				"an entry keyed on a tag, and a report that does not say so claims more than it knows",
 				got.Stats.UnpinnedCacheHits, want)
 		}
@@ -802,4 +802,93 @@ func TestUnpinnedCacheHitsAreRecorded(t *testing.T) {
 				got.Stats.UnpinnedCacheHits)
 		}
 	})
+}
+
+// A cache entry has to name the commit it describes. A revision like `main`, or none at all, is a
+// name for whatever the branch points at now, so an entry stored under it outlives the commit it
+// was computed from and the next run at any commit is served the previous one's findings.
+//
+// The direction that shows up is a stale failure, which is noisy and harmless. The direction that
+// does not is a clean answer about a commit that introduced something, on a tool whose whole job is
+// to notice.
+func TestACacheKeyNamesTheCommitItDescribes(t *testing.T) {
+	head := "1111111111111111111111111111111111111111"
+	e := New(NewRegistry(), WithRevisionResolver(
+		func(context.Context, string, string) (string, error) { return head, nil }))
+
+	commit, ok := e.commitOf(t.Context(), plugin.RepositoryTarget{URL: ".", Revision: "main"})
+	if !ok || commit != head {
+		t.Errorf("commitOf(main) = %q %v, want the resolved commit", commit, ok)
+	}
+
+	// Already a commit, so nothing to ask and nobody to ask.
+	pinned := plugin.RepositoryTarget{URL: "https://git/x", Revision: head}
+	noResolver := New(NewRegistry())
+	if commit, ok := noResolver.commitOf(t.Context(), pinned); !ok || commit != head {
+		t.Errorf("a pinned revision needs no resolver, got %q %v", commit, ok)
+	}
+}
+
+// Not knowing is not the same as knowing nothing changed. A repository whose revision cannot be
+// resolved is scanned and its result thrown away, rather than stored under a name that will mean
+// something else tomorrow.
+func TestARevisionNobodyCanResolveIsNotCached(t *testing.T) {
+	unpinned := plugin.RepositoryTarget{URL: "https://git/x", Revision: "main"}
+
+	if _, ok := New(NewRegistry()).commitOf(t.Context(), unpinned); ok {
+		t.Error("with no resolver there is no commit to key on, so this must not cache")
+	}
+
+	failing := New(NewRegistry(), WithRevisionResolver(
+		func(context.Context, string, string) (string, error) { return "", errors.New("no route to host") }))
+	if _, ok := failing.commitOf(t.Context(), unpinned); ok {
+		t.Error("a resolver that could not answer must not produce a cacheable key")
+	}
+}
+
+// One question per repository per run. A descriptor naming one repository from several components
+// would otherwise ask the remote once per control, and a failure would be retried just as often.
+func TestARevisionIsResolvedOncePerRun(t *testing.T) {
+	var calls int
+	e := New(NewRegistry(), WithRevisionResolver(func(context.Context, string, string) (string, error) {
+		calls++
+		return "2222222222222222222222222222222222222222", nil
+	}))
+	target := plugin.RepositoryTarget{URL: "https://git/x", Revision: "main"}
+	for range 3 {
+		if _, ok := e.commitOf(t.Context(), target); !ok {
+			t.Fatal("resolution should have succeeded")
+		}
+	}
+	if calls != 1 {
+		t.Errorf("resolved %d times, want 1", calls)
+	}
+
+	// Including the failure, so one unreachable remote is asked about once rather than once per
+	// control.
+	var failures int
+	f := New(NewRegistry(), WithRevisionResolver(func(context.Context, string, string) (string, error) {
+		failures++
+		return "", errors.New("no route to host")
+	}))
+	for range 3 {
+		_, _ = f.commitOf(t.Context(), plugin.RepositoryTarget{URL: "https://git/y", Revision: "main"})
+	}
+	if failures != 1 {
+		t.Errorf("asked %d times about an unreachable remote, want 1", failures)
+	}
+}
+
+// Anything that is not a repository already says exactly what was read: an image by its digest or
+// tag, a host by its URL. Asking them for a commit would turn caching off for everything.
+func TestATargetWithNoRevisionStillCaches(t *testing.T) {
+	e := New(NewRegistry())
+	for _, target := range []plugin.Target{
+		plugin.ImageTarget{Ref: "repo/x:1"},
+		plugin.HostTarget{URL: "https://example.com"},
+	} {
+		if commit, ok := e.commitOf(t.Context(), target); !ok || commit != "" {
+			t.Errorf("%T: got %q %v, want a cacheable target with no commit", target, commit, ok)
+		}
+	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/draugr-dev/draugr/pkg/saga"
 	"github.com/draugr-dev/draugr/pkg/sarif"
 	"github.com/draugr-dev/draugr/pkg/sbom"
+	"github.com/draugr-dev/draugr/pkg/tui"
 )
 
 func sampleData() Data {
@@ -33,13 +34,13 @@ func sampleData() Data {
 		{Control: "images", Verdict: norn.Fail, Counts: sarif.Counts{Error: 1, Warning: 1}},
 		{Control: "secrets", Verdict: norn.Fail, Counts: sarif.Counts{Error: 1}},
 	}}
-	return Data{Release: saga.Release{Name: "app", Version: "1.0"}, Run: run, Verdict: verdict}
+	return Data{Project: "app", Release: saga.Release{Version: "1.0"}, Run: run, Verdict: verdict}
 }
 
 // Every advertised format resolves, and answers to the name it is advertised under.
 //
 // Driven by Formats() rather than by a list written out here, because both are true of a registry
-// whose newest entry is registered under one name and reports another — and Formats() is what the
+// whose newest entry is registered under one name and reports another. And Formats() is what the
 // --report help, the unknown-format error and the artifact filenames are all built from, so it is
 // the list that has to work.
 func TestForAndFormats(t *testing.T) {
@@ -60,7 +61,7 @@ func TestForAndFormats(t *testing.T) {
 			t.Errorf("format %q is registered under a name it does not answer to: %q", f, r.Format())
 		}
 		// A format missing from formatMeta still writes a file, under a fallback name and with no
-		// content type — so a publisher delivers it as something a consumer cannot identify.
+		// content type, so a publisher delivers it as something a consumer cannot identify.
 		if _, ok := formatMeta[f]; !ok {
 			t.Errorf("format %q has no entry in formatMeta, so it has no filename or content type", f)
 		}
@@ -78,14 +79,17 @@ func TestConsoleRender(t *testing.T) {
 	s := b.String()
 	// "by priority" rather than "Fix first:": the heading now says whether the table is a
 	// shortlist or the whole set, and this fixture is small enough to be the whole set.
-	for _, want := range []string{"Draugr — FAIL", "app 1.0", "Priorities:", "P1 1", "by priority", "CVE-1", "critical", "1 high"} {
+	// The controls block answers in bands, like the verdict and the components above it. Severity
+	// is what a scanner called the flaw, and it is on the finding's own row.
+	for _, want := range []string{"DRAUGR  FAIL", "app 1.0", "P1 1", "by priority", "CVE-1", "critical"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("console output missing %q\n%s", want, s)
 		}
 	}
-	// The fix-first table carries a header (so newcomers can read it) and a Scanner column
-	// naming the tool that flagged each finding.
-	for _, want := range []string{"Scanner", "Control", "Location", "trivy", "gitleaks"} {
+	// The fix-first table carries a header (so newcomers can read it) and a Scanner column naming
+	// the tool that flagged each finding, which is most of what somebody deciding whether to
+	// believe a row is deciding about.
+	for _, want := range []string{"Scanner", "Location", "trivy", "gitleaks"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("console fix-first table missing %q\n%s", want, s)
 		}
@@ -123,8 +127,8 @@ func TestConsoleSeverityBandsNoColorOnBuffer(t *testing.T) {
 	}
 }
 
-// Color behavior now lives in pkg/tui and is tested there; this only asserts the report uses
-// it — a non-TTY writer must never receive escape codes.
+// Color behavior now lives in pkg/tui and is tested there; this only asserts the report uses it.
+// A non-TTY writer must never receive escape codes.
 func TestConsoleUsesSharedPalette(t *testing.T) {
 	var b bytes.Buffer
 	if err := (consoleReporter{}).Render(&b, sampleData()); err != nil {
@@ -141,7 +145,7 @@ func TestMarkdownRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := b.String()
-	for _, want := range []string{"## Draugr — ❌ FAIL", "| Priority |", "| Scanner |", "### Controls", "### Fix first", "`CVE-1`"} {
+	for _, want := range []string{"## Draugr · ❌ FAIL", "| Priority |", "| Scanner |", "### Controls", "### Fix first", "`CVE-1`"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("markdown output missing %q\n%s", want, s)
 		}
@@ -154,7 +158,10 @@ func TestHTMLRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := b.String()
-	for _, want := range []string{"<!doctype html>", "Draugr —", "FAIL", "app 1.0", "CVE-1", "gitleaks", ">Scanner</th>", "</html>"} {
+	for _, want := range []string{
+		"<!doctype html>", `class="mark">Draugr`, "FAIL", "app 1.0", "CVE-1", "gitleaks",
+		">Scanner</th>", "</html>",
+	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("html output missing %q", want)
 		}
@@ -167,7 +174,7 @@ func TestHTMLRender(t *testing.T) {
 
 func TestHTMLEscapesFindingContent(t *testing.T) {
 	d := Data{
-		Release: saga.Release{Name: "app"},
+		Release: saga.Release{},
 		Run: engine.Result{Controls: map[string]plugin.ControlResult{"images": {Report: sarif.Report{Results: []sarif.Result{
 			{RuleID: "R", Level: sarif.LevelError, Tool: "t", Message: "<script>alert(1)</script>"},
 		}}}}},
@@ -209,7 +216,7 @@ func TestJUnitRender(t *testing.T) {
 
 func TestJUnitCleanControlPasses(t *testing.T) {
 	d := Data{
-		Release: saga.Release{Name: "app"},
+		Release: saga.Release{},
 		Run:     engine.Result{Controls: map[string]plugin.ControlResult{"images": {Report: sarif.Report{}}}},
 		Verdict: norn.Result{Verdict: norn.Pass, Controls: []norn.ControlOutcome{{Control: "images", Verdict: norn.Pass}}},
 	}
@@ -264,7 +271,7 @@ func TestConsoleTruncatesUnprioritized(t *testing.T) {
 		results = append(results, sarif.Result{RuleID: "R", Level: sarif.LevelWarning, Tool: "t"})
 	}
 	d := Data{
-		Release: saga.Release{Name: "app"},
+		Release: saga.Release{},
 		Run:     engine.Result{Controls: map[string]plugin.ControlResult{"images": {Report: sarif.Report{Results: results}}}},
 		Verdict: norn.Result{Verdict: norn.Pass},
 	}
@@ -276,7 +283,7 @@ func TestConsoleTruncatesUnprioritized(t *testing.T) {
 	if strings.Contains(s, "Priorities:") {
 		t.Error("unprioritized run should not print a priorities line")
 	}
-	if !strings.Contains(s, "and 5 more") {
+	if !strings.Contains(s, "and 5 findings not listed") {
 		t.Errorf("expected truncation of 15 → 10 shown + 5 more:\n%s", s)
 	}
 }
@@ -287,7 +294,7 @@ func TestConsoleTopN(t *testing.T) {
 		results = append(results, sarif.Result{RuleID: "R", Level: sarif.LevelWarning, Tool: "t"})
 	}
 	base := Data{
-		Release: saga.Release{Name: "app"},
+		Release: saga.Release{},
 		Run:     engine.Result{Controls: map[string]plugin.ControlResult{"images": {Report: sarif.Report{Results: results}}}},
 		Verdict: norn.Result{Verdict: norn.Pass},
 	}
@@ -302,11 +309,11 @@ func TestConsoleTopN(t *testing.T) {
 	}
 
 	// TopN 5 → 5 shown, "and 10 more".
-	if s := render(5); !strings.Contains(s, "and 10 more") {
+	if s := render(5); !strings.Contains(s, "and 10 findings not listed") {
 		t.Errorf("--top 5 of 15 should show 10 more:\n%s", s)
 	}
 	// TopN -1 (all) → no truncation tail.
-	if s := render(-1); strings.Contains(s, "more finding(s)") {
+	if s := render(-1); strings.Contains(s, "not listed") {
 		t.Errorf("--top 0/all should not truncate:\n%s", s)
 	}
 	// TopN larger than the finding count → no truncation tail.
@@ -316,7 +323,7 @@ func TestConsoleTopN(t *testing.T) {
 }
 
 func TestConsoleNoFindings(t *testing.T) {
-	d := Data{Release: saga.Release{Name: "app"}, Verdict: norn.Result{Verdict: norn.Pass}}
+	d := Data{Release: saga.Release{}, Verdict: norn.Result{Verdict: norn.Pass}}
 	var b bytes.Buffer
 	if err := (consoleReporter{}).Render(&b, d); err != nil {
 		t.Fatal(err)
@@ -336,7 +343,7 @@ func minPriorityData(band string) Data {
 		{RuleID: "CVE-P4", Level: sarif.LevelNote, Priority: "P4", Tool: "trivy"},
 	}
 	return Data{
-		Release:     saga.Release{Name: "app"},
+		Release:     saga.Release{},
 		Run:         engine.Result{Controls: map[string]plugin.ControlResult{"sca": {Report: sarif.Report{Results: results}}}},
 		Verdict:     norn.Result{Verdict: norn.Fail},
 		MinPriority: band,
@@ -369,7 +376,7 @@ func TestMinPriorityFiltersEveryHumanFormat(t *testing.T) {
 	}
 }
 
-// The counts describe the whole run even when the listing is filtered — otherwise you lose sight
+// The counts describe the whole run even when the listing is filtered, otherwise you lose sight
 // of the backlog you chose not to look at. The output has to say so.
 func TestMinPriorityKeepsCountsAndExplainsItself(t *testing.T) {
 	var b bytes.Buffer
@@ -401,14 +408,14 @@ func TestAtOrAbove(t *testing.T) {
 	}
 }
 
-// A rule id names a finding without explaining it — "DS-0002" is meaningless to the reader we
-// care about most. The message belongs in the table.
+// A rule id names a finding without explaining it. "DS-0002" is meaningless to the reader we care
+// about most. The message belongs in the table.
 func TestConsoleShowsTheFindingMessage(t *testing.T) {
 	d := Data{
-		Release: saga.Release{Name: "app"},
+		Release: saga.Release{},
 		Run: engine.Result{Controls: map[string]plugin.ControlResult{"iac": {Report: sarif.Report{Results: []sarif.Result{
 			{RuleID: "DS-0002", Level: sarif.LevelError, Priority: "P1", Tool: "trivy-config",
-				Message: "Default Seccomp profile not set — the container runs unconfined"},
+				Message: "Default Seccomp profile not set, the container runs unconfined"},
 		}}}}},
 		Verdict: norn.Result{Verdict: norn.Fail},
 	}
@@ -420,7 +427,7 @@ func TestConsoleShowsTheFindingMessage(t *testing.T) {
 	if !strings.Contains(out, "Default Seccomp profile not set") {
 		t.Errorf("the finding's message should appear under its row:\n%s", out)
 	}
-	// The id is still there — it's what you search upstream with.
+	// The id is still there, it's what you search upstream with.
 	if !strings.Contains(out, "DS-0002") {
 		t.Errorf("the rule id should still be shown:\n%s", out)
 	}
@@ -443,8 +450,8 @@ func TestFindingSummary(t *testing.T) {
 	}
 }
 
-// The console links a rule id to wherever the scanner said the rule is documented — which is
-// how an id like "DS-0002", with no public advisory to derive a URL from, becomes reachable.
+// The console links a rule id to wherever the scanner said the rule is documented. Which is how
+// an id like "DS-0002", with no public advisory to derive a URL from, becomes reachable.
 func TestConsoleLinksTheScannerPublishedHelpURI(t *testing.T) {
 	d := Data{Run: engine.Result{Controls: map[string]plugin.ControlResult{
 		"sast": {Report: sarif.Report{
@@ -476,7 +483,7 @@ func TestShortRuleID(t *testing.T) {
 	if len([]rune(got)) > ruleIDWidth {
 		t.Errorf("len(%q) = %d, want at most %d", got, len([]rune(got)), ruleIDWidth)
 	}
-	// The tail is the specific half — that's what has to survive.
+	// The tail is the specific half. That's what has to survive.
 	if !strings.HasSuffix(got, "github-actions-mutable-action-tag") {
 		t.Errorf("got %q, want the tail of the id kept", got)
 	}
@@ -504,8 +511,8 @@ func TestShortRuleIDFallsBackWhenNoSeparatorFits(t *testing.T) {
 }
 
 func TestShortRuleIDKeepsAWholeSegmentEvenWhenTwoWouldNotFit(t *testing.T) {
-	// The dot search runs inside the visible tail, so a boundary just past the cut is used
-	// rather than one before it — otherwise the result would exceed the column.
+	// The dot search runs inside the visible tail, so a boundary just past the cut is used rather
+	// than one before it. Otherwise the result would exceed the column.
 	got := shortRuleID("a.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccc")
 	if len([]rune(got)) > ruleIDWidth {
 		t.Errorf("len(%q) = %d, want at most %d", got, len([]rune(got)), ruleIDWidth)
@@ -537,12 +544,12 @@ func TestLongRuleIDStaysWholeInJSON(t *testing.T) {
 	}
 }
 
-// Compact reaches the machine formats and leaves the human ones alone — making those harder to
+// Compact reaches the machine formats and leaves the human ones alone. Making those harder to
 // read would be the opposite of the point.
 func TestCompactAffectsOnlyTheMachineFormats(t *testing.T) {
 	base := sampleData()
 	compact := sampleData()
-	compact.Compact = true
+	compact.View = ViewCompact
 
 	for _, format := range []string{"json", "sarif"} {
 		var full, lean bytes.Buffer
@@ -559,17 +566,35 @@ func TestCompactAffectsOnlyTheMachineFormats(t *testing.T) {
 			t.Errorf("%s: compact output is not valid JSON", format)
 		}
 	}
-	for _, format := range []string{"console", "markdown"} {
-		var full, lean bytes.Buffer
-		if err := reporters[format].Render(&full, base); err != nil {
-			t.Fatalf("%s: %v", format, err)
-		}
-		if err := reporters[format].Render(&lean, compact); err != nil {
-			t.Fatalf("%s compact: %v", format, err)
-		}
-		if full.String() != lean.String() {
-			t.Errorf("%s should ignore --compact", format)
-		}
+	// The console has a dense form of its own: the same columns with the explanation on the row
+	// rather than under it. Denser, and still the same report.
+	consoleFull, consoleLean := goldenEnrichedData(), goldenEnrichedData()
+	consoleLean.View = ViewCompact
+	var full, lean bytes.Buffer
+	if err := reporters["console"].Render(&full, consoleFull); err != nil {
+		t.Fatalf("console: %v", err)
+	}
+	if err := reporters["console"].Render(&lean, consoleLean); err != nil {
+		t.Fatalf("console compact: %v", err)
+	}
+	if lean.Len() >= full.Len() {
+		t.Errorf("console: compact (%d) not shorter than full (%d)", lean.Len(), full.Len())
+	}
+	if strings.Count(lean.String(), "\n") >= strings.Count(full.String(), "\n") {
+		t.Error("console: compact should take fewer lines")
+	}
+	// Markdown is read rendered, where a row that has to carry its own explanation is a table cell
+	// with a paragraph in it.
+	full.Reset()
+	lean.Reset()
+	if err := reporters["markdown"].Render(&full, base); err != nil {
+		t.Fatalf("markdown: %v", err)
+	}
+	if err := reporters["markdown"].Render(&lean, compact); err != nil {
+		t.Fatalf("markdown compact: %v", err)
+	}
+	if full.String() != lean.String() {
+		t.Error("markdown should ignore --compact")
 	}
 }
 
@@ -589,7 +614,7 @@ func TestConsoleNamesControlsThatCouldNotRun(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"Controls:", "sca", "ERROR", "did not run", "executable file not found"} {
+	for _, want := range []string{"CONTROLS", "sca", "ERROR", "did not run", "executable file not found"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
@@ -625,7 +650,7 @@ func TestConsoleMarksPartialControlsAsError(t *testing.T) {
 // An explanation belongs under the control it explains.
 //
 // Indentation is the only thing that says whose failure a message is, and the message names a
-// scanner rather than a control — so one printed after the table sits against whichever control
+// scanner rather than a control, so one printed after the table sits against whichever control
 // happens to be listed last and reads as that one's problem, with nothing in the sentence to
 // contradict it. The control that errored is deliberately not the last one here, because that is
 // the only arrangement where the two placements differ.
@@ -676,7 +701,7 @@ func TestSARIFHonorsMinPriority(t *testing.T) {
 		t.Fatal(err)
 	}
 	if full.Len() == filtered.Len() {
-		t.Fatalf("filtered SARIF is the same size as unfiltered (%d bytes) — the flag did nothing", full.Len())
+		t.Fatalf("filtered SARIF is the same size as unfiltered (%d bytes), the flag did nothing", full.Len())
 	}
 	out := filtered.String()
 	for _, want := range []string{"CVE-P1", "CVE-P2"} {
@@ -691,7 +716,7 @@ func TestSARIFHonorsMinPriority(t *testing.T) {
 	}
 }
 
-// A finding with no priority was never ranked — prioritization did not run for it. Dropping it
+// A finding with no priority was never ranked. Prioritization did not run for it. Dropping it
 // would read an unset field as "low", which is the worst available interpretation.
 func TestSARIFKeepsUnprioritizedFindings(t *testing.T) {
 	d := minPriorityData("P1")
@@ -726,7 +751,7 @@ func TestSARIFFilterLeavesTheRunIntact(t *testing.T) {
 // Verdict.Controls omits it, and the report describes a thinner run rather than a broken one.
 func erroredRunData() Data {
 	return Data{
-		Release: saga.Release{Name: "app", Version: "1.0"},
+		Release: saga.Release{Version: "1.0"},
 		Run: engine.Result{
 			Controls: map[string]plugin.ControlResult{
 				"sca": {Control: "sca", Report: sarif.Report{Tool: "trivy", Results: []sarif.Result{
@@ -744,9 +769,9 @@ func erroredRunData() Data {
 }
 
 // A control whose scanner never ran found nothing because it looked at nothing. Every format a
-// person reads has to say so — this held for the console and for neither other format, and a
-// shared HTML or markdown report is the one most likely to be handed to someone else as a
-// record of what was checked.
+// person reads has to say so. This held for the console and for neither other format, and a
+// shared HTML or markdown report is the one most likely to be handed to someone else as a record
+// of what was checked.
 func TestEveryHumanFormatReportsAControlThatCouldNotRun(t *testing.T) {
 	for _, format := range []string{"console", "markdown", "html"} {
 		t.Run(format, func(t *testing.T) {
@@ -813,7 +838,7 @@ func TestEveryHumanFormatSaysItFiltered(t *testing.T) {
 
 // What a run did to its targets belongs where the verdict is read. A scan that probed a live
 // endpoint is a thing that happened, and the report is where someone looks to find out what
-// happened — not only the docs describing the control.
+// happened, not only the docs describing the control.
 func TestConsoleReportsWhatTheRunDid(t *testing.T) {
 	d := sampleData()
 	d.Run.Effects = []plugin.Effect{{
@@ -844,7 +869,7 @@ func TestConsoleSaysNothingWhenTheRunOnlyRead(t *testing.T) {
 }
 
 // A finding answers "what is wrong". Evidence also has to answer "what was measured, and against
-// what" — and for a compliance control that is the question asked first.
+// what", and for a compliance control that is the question asked first.
 func TestProvenanceLines(t *testing.T) {
 	t.Parallel()
 
@@ -877,7 +902,7 @@ func TestProvenanceLines(t *testing.T) {
 	}
 }
 
-// Nothing to say means nothing rendered — not an empty heading on every report.
+// Nothing to say means nothing rendered, not an empty heading on every report.
 func TestProvenanceOmittedWhenThereIsNone(t *testing.T) {
 	t.Parallel()
 
@@ -898,9 +923,9 @@ func TestProvenanceOmittedWhenThereIsNone(t *testing.T) {
 }
 
 func TestDedupeMessagesCollapsesIdenticalFailures(t *testing.T) {
-	// Two components whose scanner binary is missing produce the same sentence twice. Two
-	// identical lines invite the reader to look for the difference between them, and there is
-	// none — the duplicate says nothing about which job it came from.
+	// Two components whose scanner binary is missing produce the same sentence twice. Two identical
+	// lines invite the reader to look for the difference between them, and there is none. The
+	// duplicate says nothing about which job it came from.
 	got := dedupeMessages([]string{
 		`run semgrep: exec: "semgrep": executable file not found in $PATH`,
 		`run semgrep: exec: "semgrep": executable file not found in $PATH`,
@@ -980,113 +1005,155 @@ func suppressedBy(names ...string) Data {
 	}
 }
 
-func TestSuppressionLineNamesWhoAccepted(t *testing.T) {
-	// The name is the point of recording it. A count of unattributed says *that* there is a gap;
-	// it does not say who to ask about the rest, which is the question an auditor arrives with.
-	got := suppressionLine(suppressedBy("a.reviewer", "a.reviewer", "b.owner", ""))
-	want := "4 findings suppressed by config.exclude — 2 accepted by a.reviewer, 1 accepted by b.owner, 1 unattributed"
-	if got != want {
+func TestDecisionsNameWhoAcceptedWhatAndWhy(t *testing.T) {
+	// The name is the point of recording it. A count of unattributed says *that* there is a gap; it
+	// does not say who to ask about the rest, nor what any of them thought was acceptable, which is
+	// the question an auditor arrives with. The line above it counts; this answers.
+	if got, want := suppressionLine(suppressedBy("a.reviewer", ""), false),
+		"config.exclude: 2 findings suppressed"; got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
+	}
+	got := decisions(suppressedBy("a.reviewer", "a.reviewer", "b.owner", ""))
+	if len(got) != 3 {
+		t.Fatalf("got %d decisions, want one per acceptance: %+v", len(got), got)
+	}
+	if got[0].by != "a.reviewer" || got[0].n != 2 {
+		t.Errorf("the largest decision should lead: %+v", got[0])
+	}
+	var unsigned bool
+	for _, dec := range got {
+		if dec.by == "unattributed" && dec.n == 1 {
+			unsigned = true
+		}
+	}
+	if !unsigned {
+		t.Errorf("a suppression nobody signed is the one worth naming, and it is missing: %+v", got)
 	}
 }
 
-func TestSuppressionLineWithNobodyNamed(t *testing.T) {
-	got := suppressionLine(suppressedBy("", ""))
-	want := "2 findings suppressed by config.exclude — 2 unattributed"
-	if got != want {
-		t.Errorf("got  %q\nwant %q", got, want)
+func TestDecisionsWithNobodyNamed(t *testing.T) {
+	got := decisions(suppressedBy("", ""))
+	if len(got) != 1 || got[0].by != "unattributed" || got[0].n != 2 {
+		t.Errorf("got %+v, want one unattributed decision covering both", got)
 	}
 }
 
 func TestSuppressionLineIsAbsentWithNothingSuppressed(t *testing.T) {
-	if got := suppressionLine(Data{}); got != "" {
+	if got := suppressionLine(Data{}, true); got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
 }
 
-func TestSuppressionLineOrdersAcceptorsStably(t *testing.T) {
+func TestDecisionsOrderStably(t *testing.T) {
 	// Map iteration would reorder this between runs, and a report offered as evidence should
 	// not differ from itself.
-	first := suppressionLine(suppressedBy("z.last", "a.first"))
+	first := decisions(suppressedBy("z.last", "a.first"))
 	for range 5 {
-		if got := suppressionLine(suppressedBy("z.last", "a.first")); got != first {
-			t.Fatalf("unstable order:\n%s\n%s", first, got)
+		got := decisions(suppressedBy("z.last", "a.first"))
+		if len(got) != len(first) {
+			t.Fatalf("unstable length: %d then %d", len(first), len(got))
+		}
+		for i := range got {
+			if got[i].by != first[i].by {
+				t.Fatalf("unstable order:\n%+v\n%+v", first, got)
+			}
 		}
 	}
-	if !strings.Contains(first, "a.first, 1 accepted by z.last") {
-		t.Errorf("expected alphabetical: %q", first)
+	// Equal counts fall back to the name, so two readings of one report agree.
+	if first[0].by != "a.first" {
+		t.Errorf("expected alphabetical on a tie: %+v", first)
 	}
 }
 
 func TestExploitabilityLine(t *testing.T) {
+	// The feeds and their dates. What they did to this run is counted in the signals block, beside
+	// what every other signal did, so the two can be compared.
 	fetched := time.Date(2026, 8, 1, 9, 12, 0, 0, time.UTC)
-	cases := []struct {
-		name      string
-		feeds     []FeedProvenance
-		escalated int
-		want      string
+	for _, c := range []struct {
+		name  string
+		feeds []FeedProvenance
+		want  string
 	}{
-		{"none", nil, 0, ""},
-		{
-			// Dates alone say the feeds were consulted, not what they did. Without the effect the
-			// only way to find out is to read every finding and then doubt yourself.
-			"consulted and changed nothing",
-			[]FeedProvenance{{Name: "kev", FetchedAt: fetched}}, 0,
-			"Exploitability: KEV 2026-08-01 — nothing raised",
-		},
-		{
-			"one finding raised",
-			[]FeedProvenance{{Name: "kev", FetchedAt: fetched}}, 1,
-			"Exploitability: KEV 2026-08-01 — 1 finding raised",
-		},
-		{
-			"several raised",
-			[]FeedProvenance{{Name: "kev", FetchedAt: fetched}}, 4,
-			"Exploitability: KEV 2026-08-01 — 4 findings raised",
-		},
-		{
-			// A file the operator supplied has no fetch date, and saying so is more accurate
-			// than inventing today's.
-			"a supplied file",
-			[]FeedProvenance{{Name: "kev"}}, 0,
-			"Exploitability: KEV (file) — nothing raised",
-		},
-		{
-			"stale is said out loud",
-			[]FeedProvenance{{Name: "epss", FetchedAt: fetched, Stale: true}}, 0,
-			"Exploitability: EPSS 2026-08-01, stale — nothing raised",
-		},
-		{
-			"both",
-			[]FeedProvenance{{Name: "kev", FetchedAt: fetched}, {Name: "epss", FetchedAt: fetched}}, 2,
-			"Exploitability: KEV 2026-08-01 · EPSS 2026-08-01 — 2 findings raised",
-		},
-	}
-	for _, c := range cases {
+		{"nothing loaded says nothing", nil, ""},
+		{"a fetched copy carries its date",
+			[]FeedProvenance{{Name: "kev", FetchedAt: fetched}},
+			"Exploitability: KEV 2026-08-01"},
+		{"a file has no fetch to record",
+			[]FeedProvenance{{Name: "kev"}},
+			"Exploitability: KEV (file)"},
+		{"stale is said out loud",
+			[]FeedProvenance{{Name: "epss", FetchedAt: fetched, Stale: true}},
+			"Exploitability: EPSS 2026-08-01, stale"},
+		{"both",
+			[]FeedProvenance{{Name: "kev", FetchedAt: fetched}, {Name: "epss", FetchedAt: fetched}},
+			"Exploitability: KEV 2026-08-01 · EPSS 2026-08-01"},
+	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := exploitabilityLine(c.feeds, c.escalated); got != c.want {
+			if got := exploitabilityLine(c.feeds); got != c.want {
 				t.Errorf("got %q, want %q", got, c.want)
 			}
 		})
 	}
 }
 
-func TestEscalationNote(t *testing.T) {
-	if got := escalationNote(nil); got != "" {
-		t.Errorf("nothing raised it, so nothing should be claimed: %q", got)
-	}
-	// What it was ranked as, not what it was raised from: the Severity column still shows the
-	// scanner's rating, so "raised from high" beside a row reading "high" would say nothing.
-	got := escalationNote(&sarif.Escalation{
-		From: sarif.SeverityHigh, To: sarif.SeverityCritical,
-		Signal: "kev", Detail: "on KEV", AsOf: "2026-08-01",
+func TestNotesOpenWithWhatArguedWithTheBand(t *testing.T) {
+	// The mark first, so it aligns down a listing. It names the dataset; the day the data was
+	// fetched is not repeated per finding, because it is the same day for every row in the run.
+	got := notesFor(tui.Plain(), finding{
+		severity: sarif.SeverityHigh, message: "malicious code in the upstream tarballs",
+		escalation: &sarif.Escalation{
+			From: sarif.SeverityHigh, To: sarif.SeverityCritical,
+			Signal: "kev", Detail: "on KEV", AsOf: "2026-08-01",
+		},
 	})
-	if got != "↑ ranked as critical — on KEV (2026-08-01)" {
+	if len(got) != 1 || got[0] != "↑ KEV · malicious code in the upstream tarballs" {
 		t.Errorf("got %q", got)
 	}
-	// No date: the claim stands without one rather than being dropped or dated wrongly.
-	got = escalationNote(&sarif.Escalation{From: sarif.SeverityLow, To: sarif.SeverityMedium, Detail: "EPSS 0.9"})
-	if got != "↑ ranked as medium — EPSS 0.9" {
+	// EPSS carries its score, which is the whole of what a threshold decision rests on.
+	got = notesFor(tui.Plain(), finding{
+		severity: sarif.SeverityLow, message: "a flaw",
+		escalation: &sarif.Escalation{
+			From: sarif.SeverityLow, To: sarif.SeverityMedium, Signal: "epss", Detail: "EPSS 0.90",
+		},
+	})
+	if len(got) != 1 || got[0] != "↑ EPSS 0.90 · a flaw" {
+		t.Errorf("got %q", got)
+	}
+	// An analyzer that lowered a band is named, because a call graph is a claim somebody can argue
+	// with and an unattributed one is not.
+	got = notesFor(tui.Plain(), finding{
+		severity: sarif.SeverityHigh, message: "a flaw",
+		reachability: &sarif.Reachability{
+			State: sarif.ReachabilityUnreachable, Analyzer: "govulncheck",
+			RankedAs: sarif.SeverityMedium, AsOf: "2026-08-21",
+		},
+	})
+	if len(got) != 1 || got[0] != "↓ unreachable · a flaw · govulncheck, 2026-08-21" {
+		t.Errorf("got %q", got)
+	}
+	// Nothing argued with it, so the line is the finding's own sentence and nothing else.
+	got = notesFor(tui.Plain(), finding{severity: sarif.SeverityHigh, message: "a flaw"})
+	if len(got) != 1 || got[0] != "a flaw" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A finding several things argued about goes back to a line per argument, because the alternative
+// is a sentence wrapped under a sentence.
+func TestNotesSplitWhenTheyCannotFitALine(t *testing.T) {
+	long := strings.Repeat("because ", 12) + "the control says so"
+	f := finding{
+		severity:      sarif.SeverityHigh,
+		message:       "a short sentence",
+		escalation:    &sarif.Escalation{From: sarif.SeverityHigh, To: sarif.SeverityCritical, Signal: "kev", Detail: "on KEV"},
+		priorityFloor: long,
+	}
+	if got := notesFor(tui.Plain(), f); len(got) != 3 {
+		t.Fatalf("got %d lines, want one per statement:\n%q", len(got), got)
+	}
+	// Short enough to read as one sentence, so it is one.
+	f.priorityFloor = ""
+	if got := notesFor(tui.Plain(), f); len(got) != 1 || got[0] != "↑ KEV · a short sentence" {
 		t.Errorf("got %q", got)
 	}
 }
@@ -1165,9 +1232,9 @@ func TestExploitabilityInJSON(t *testing.T) {
 }
 
 func TestToolBuildLines(t *testing.T) {
-	// pinned and signed share a line — "Draugr fetched these and checked them" is one fact, and a
-	// reader who wants the distinction has the JSON. Anything weaker gets its own, because that
-	// is the one they have to decide about.
+	// pinned and signed share a line, "Draugr fetched these and checked them" is one fact, and a
+	// reader who wants the distinction has the JSON. Anything weaker gets its own, because that is
+	// the one they have to decide about.
 	got := toolBuildLines([]ToolBuild{
 		{Name: "trivy", Version: "0.69.3", Level: "signed"},
 		{Name: "gitleaks", Version: "8.30.1", Level: "pinned"},
@@ -1296,9 +1363,9 @@ func TestRepositoriesFromDeduplicatesAcrossControls(t *testing.T) {
 }
 
 func TestRepositoriesFromKeepsControlsThatDisagree(t *testing.T) {
-	// Independent checkouts mean a branch that moves mid-scan can genuinely be read at two
-	// commits. Collapsing that would be an assumption presented as evidence — and the report
-	// would name a revision that half of it did not describe.
+	// Independent checkouts mean a branch that moves mid-scan can genuinely be read at two commits.
+	// Collapsing that would be an assumption presented as evidence. And the report would name a
+	// revision that half of it did not describe.
 	repo := func(rev string) sarif.Report {
 		return sarif.Report{Provenance: []sarif.Provenance{{Tool: "t", Fields: []sarif.Field{
 			{Key: "repository", Value: "."}, {Key: "revision", Value: rev},
@@ -1325,21 +1392,28 @@ func TestRepositoriesFromIgnoresProvenanceAboutSomethingElse(t *testing.T) {
 	}
 }
 
-func TestRepositoryLinesReadAsAClauseNotAnAlarm(t *testing.T) {
-	got := repositoryLines([]RepositoryProvenance{{URL: ".", Revision: "abc123def456"}})
-	if len(got) != 1 || got[0] != "Scanned: . at abc123de" {
+func TestRepositoryRowsReadAsAClauseNotAnAlarm(t *testing.T) {
+	// One row per repository, because this is the block that grows without bound: a component may
+	// hold several and a descriptor many components.
+	got := repositoryRows([]RepositoryProvenance{{URL: ".", Revision: "abc123def456"}})
+	if len(got) != 1 || got[0] != [2]string{".", "abc123de"} {
 		t.Errorf("got %q", got)
 	}
-	got = repositoryLines([]RepositoryProvenance{{URL: ".", Revision: "abc123def456", Uncommitted: 7}})
-	if len(got) != 1 || got[0] != "Scanned: . at abc123de (7 uncommitted files not included)" {
+	// The host goes: every row carries the same one, and the path is what tells them apart.
+	got = repositoryRows([]RepositoryProvenance{{URL: "https://github.com/acme/api", Revision: "abc123def456"}})
+	if len(got) != 1 || got[0][0] != "acme/api" {
+		t.Errorf("got %q", got)
+	}
+	got = repositoryRows([]RepositoryProvenance{{URL: ".", Revision: "abc123def456", Uncommitted: 7}})
+	if len(got) != 1 || got[0][1] != "abc123de · 7 uncommitted files not included" {
 		t.Errorf("got %q", got)
 	}
 	// One file is one file. A report that says "1 uncommitted files" was written by a program.
-	got = repositoryLines([]RepositoryProvenance{{URL: ".", Revision: "abc123def456", Uncommitted: 1}})
-	if !strings.Contains(got[0], "1 uncommitted file ") {
+	got = repositoryRows([]RepositoryProvenance{{URL: ".", Revision: "abc123def456", Uncommitted: 1}})
+	if !strings.Contains(got[0][1], "1 uncommitted file ") {
 		t.Errorf("got %q", got)
 	}
-	if repositoryLines(nil) != nil {
+	if len(repositoryRows(nil)) != 0 {
 		t.Error("a run that read no repository should say nothing")
 	}
 }
@@ -1360,27 +1434,20 @@ func TestPerControlProvenanceDropsTheRepositoryFields(t *testing.T) {
 	}
 }
 
-func TestRepositoryLineSaysWhenTheTreeIsNotReproducible(t *testing.T) {
-	// The committed line and the working-tree line describe opposite situations with the same
+func TestRepositoryRowSaysWhenTheTreeIsNotReproducible(t *testing.T) {
+	// The committed row and the working-tree row describe opposite situations with the same
 	// number: one counts what is missing, the other counts what is uniquely there.
-	working := repositoryLines([]RepositoryProvenance{{
+	working := repositoryRows([]RepositoryProvenance{{
 		URL: ".", Revision: "abc123def456", Uncommitted: 2, WorkingTree: true,
 	}})
-	if len(working) != 1 || working[0] != "Scanned: . working tree at abc123de+ (2 uncommitted files, not reproducible)" {
+	if len(working) != 1 || working[0][1] != "working tree abc123de+ · 2 uncommitted files, not reproducible" {
 		t.Errorf("got %q", working)
 	}
-	committed := repositoryLines([]RepositoryProvenance{{
+	committed := repositoryRows([]RepositoryProvenance{{
 		URL: ".", Revision: "abc123def456", Uncommitted: 2,
 	}})
-	if committed[0] != "Scanned: . at abc123de (2 uncommitted files not included)" {
+	if committed[0][1] != "abc123de · 2 uncommitted files not included" {
 		t.Errorf("got %q", committed)
-	}
-	// A clean working tree is the same bytes as its commit, so no "+" and nothing to warn about.
-	clean := repositoryLines([]RepositoryProvenance{{
-		URL: ".", Revision: "abc123def456", WorkingTree: true,
-	}})
-	if clean[0] != "Scanned: . working tree at abc123de" {
-		t.Errorf("got %q", clean)
 	}
 }
 
@@ -1526,9 +1593,9 @@ func TestConsoleNamesAScannerThatCouldNotAnswer(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	out := buf.String()
-	// The scanner, the component it did not answer for, and why — an entry naming only the
-	// scanner leaves a reader unable to tell whether it mattered.
-	for _, want := range []string{"Not measured:", "kube-bench-job", "team-a", "cannot be narrowed"} {
+	// The scanner, the component it did not answer for, and why, an entry naming only the scanner
+	// leaves a reader unable to tell whether it mattered.
+	for _, want := range []string{"NOT MEASURED", "kube-bench-job", "team-a", "cannot be narrowed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
@@ -1536,7 +1603,7 @@ func TestConsoleNamesAScannerThatCouldNotAnswer(t *testing.T) {
 }
 
 // And a run where nothing was skipped says nothing, or the block becomes something readers learn
-// to scroll past — which takes the run that did skip something down with it.
+// to scroll past. Which takes the run that did skip something down with it.
 func TestConsoleSaysNothingWhenEveryScannerCouldAnswer(t *testing.T) {
 	var buf bytes.Buffer
 	if err := (consoleReporter{}).Render(&buf, Data{
@@ -1611,7 +1678,7 @@ func TestTheThreeKindsOfAcceptanceStayApart(t *testing.T) {
 	// end of them. One total could only support the weakest.
 	d := Data{Run: engine.Result{Suppressed: 2, Imported: 1, Silenced: 4}}
 
-	suppressed, imported, silenced := suppressionLine(d), importedLine(d), silencedLine(d)
+	suppressed, imported, silenced := suppressionLine(d, false), importedLine(d, false), silencedLine(d)
 	for name, line := range map[string]string{
 		"suppressed": suppressed, "imported": imported, "silenced": silenced,
 	} {
@@ -1625,5 +1692,46 @@ func TestTheThreeKindsOfAcceptanceStayApart(t *testing.T) {
 	// And each carries its own count rather than a shared total.
 	if !strings.Contains(suppressed, "2") || !strings.Contains(imported, "1") || !strings.Contains(silenced, "4") {
 		t.Errorf("counts merged:\n  %s\n  %s\n  %s", suppressed, imported, silenced)
+	}
+}
+
+// TestTheJSONReportCarriesTheSameGateTheConsolePrints holds the two renderings to one policy. A
+// terminal reader and a dashboard reading report.json are asking the same question about the same
+// run, and two derivations of the gate is how they come to give different answers.
+func TestTheJSONReportCarriesTheSameGateTheConsolePrints(t *testing.T) {
+	d := Data{
+		Release: saga.Release{Version: "1"},
+		Verdict: norn.Result{Verdict: norn.Fail},
+		// A severity gate, refined per control, with --no-gate on. One question: the band is not
+		// set, and the document must not invent one.
+		Gate: GateSettings{
+			Threshold:  sarif.SeverityMedium,
+			PerControl: map[string]sarif.Severity{"licenses": sarif.SeverityCritical},
+			Disabled:   true,
+		},
+	}
+	var buf bytes.Buffer
+	if err := (jsonReporter{}).Render(&buf, d); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Gate struct {
+			Threshold      string            `json:"threshold"`
+			PerControl     map[string]string `json:"perControl"`
+			FailOnPriority string            `json:"failOnPriority"`
+			Disabled       bool              `json:"disabled"`
+		} `json:"gate"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Gate.Threshold != "medium" || !doc.Gate.Disabled {
+		t.Errorf("gate = %+v", doc.Gate)
+	}
+	if doc.Gate.FailOnPriority != "" {
+		t.Errorf("a severity gate also reported a band: %+v", doc.Gate)
+	}
+	if doc.Gate.PerControl["licenses"] != "critical" {
+		t.Errorf("perControl = %v", doc.Gate.PerControl)
 	}
 }

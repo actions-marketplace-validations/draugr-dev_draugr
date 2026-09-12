@@ -90,16 +90,16 @@ func TestApplyConfigDefaultsMergesUnderTheDescriptor(t *testing.T) {
 	}
 
 	// The descriptor has an opinion about config and none about timeout.
-	m := &saga.Model{Config: saga.Config{Controllers: map[string]saga.ControllerSettings{
+	m := &saga.Model{Config: saga.Config{Controls: map[string]saga.ControllerSettings{
 		"sast": {"semgrep": map[string]any{"config": "p/mine"}},
 	}}}
 	if _, err := applyConfigDefaults(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}
 
-	sem, _ := m.Config.Controllers["sast"]["semgrep"].(map[string]any)
+	sem, _ := m.Config.Controls["sast"]["semgrep"].(map[string]any)
 	if sem == nil {
-		if s, ok := m.Config.Controllers["sast"]["semgrep"].(saga.ControllerSettings); ok {
+		if s, ok := m.Config.Controls["sast"]["semgrep"].(saga.ControllerSettings); ok {
 			sem = s
 		}
 	}
@@ -118,8 +118,8 @@ func TestApplyConfigDefaultsIsANoOpWithoutAFile(t *testing.T) {
 	if _, err := applyConfigDefaults(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Config.Controllers) != 0 {
-		t.Errorf("controllers invented from nowhere: %+v", m.Config.Controllers)
+	if len(m.Config.Controls) != 0 {
+		t.Errorf("controllers invented from nowhere: %+v", m.Config.Controls)
 	}
 }
 
@@ -298,7 +298,7 @@ func TestConfigShowReachesEveryField(t *testing.T) {
 			continue
 		}
 		if !shown[name] {
-			t.Errorf("`config show` never prints anything under %q — a setting there reads as "+
+			t.Errorf("`config show` never prints anything under %q, a setting there reads as "+
 				"'they set nothing', which is the opposite of true", name)
 		}
 	}
@@ -323,8 +323,8 @@ func fillConfig(t *testing.T, v reflect.Value) {
 		case reflect.Struct:
 			fillConfig(t, val)
 		case reflect.Interface, reflect.Map:
-			// ControllerSettings is map[string]any, so there is no typed shape to walk — a
-			// synthetic nested value stands in for the free-form tree a real one holds.
+			// ControllerSettings is map[string]any, so there is no typed shape to walk, a synthetic
+			// nested value stands in for the free-form tree a real one holds.
 			val.Set(reflect.ValueOf(map[string]any{"scanner": map[string]any{"key": "value"}}))
 		default:
 			fillConfig(t, val)

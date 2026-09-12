@@ -11,9 +11,13 @@ import (
 )
 
 // TemplateView is the data model a "template" report renders against. It is the documented,
-// stable surface for custom templates — a friendly, flattened view of a scan (no engine
+// stable surface for custom templates, a friendly, flattened view of a scan (no engine
 // internals), leading with the verdict and prioritized findings.
 type TemplateView struct {
+	// Project is what the run is about. Exposed beside the release because a release carries only
+	// a version now, and a template with nothing but that renders "1.4.0" over and over with no
+	// statement about what is at 1.4.0.
+	Project    string
 	Release    saga.Release
 	Verdict    string // "pass" | "fail"
 	Pass       bool
@@ -38,6 +42,7 @@ type TemplateFinding struct {
 func templateViewOf(d Data) TemplateView {
 	s := summarize(d)
 	v := TemplateView{
+		Project:  d.ProjectName(),
 		Release:  d.Release,
 		Verdict:  string(d.Verdict.Verdict),
 		Pass:     s.verdict != norn.Fail,

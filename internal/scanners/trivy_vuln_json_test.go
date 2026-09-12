@@ -1,6 +1,8 @@
 package scanners
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -120,8 +122,8 @@ func TestTrivyVulnsKeepWhatTheSARIFPathGave(t *testing.T) {
 		byRule[r.RuleID] = r
 	}
 
-	// The score behind `security-severity`, taken as the highest across sources — a vendor rating
-	// a flaw below NVD is a claim about their build, not a correction.
+	// The score behind `security-severity`, taken as the highest across sources, a vendor rating a
+	// flaw below NVD is a claim about their build, not a correction.
 	flask := byRule["CVE-2018-1000656"]
 	if !flask.HasScore || flask.Score != 7.5 {
 		t.Errorf("score = %v (has=%v), want 7.5 from nvd rather than redhat's 5.9",
@@ -154,12 +156,34 @@ func TestTrivyVulnMessageSaysWhatToDo(t *testing.T) {
 	for _, r := range rep.Results {
 		byRule[r.RuleID] = r
 	}
-	if got := byRule["CVE-2018-1000656"].Message; !strings.Contains(got, "fixed in 0.12.3") {
-		t.Errorf("message = %q, want the fixed version", got)
+	// Before the advisory's own words, which decide how long the line is and therefore what gets
+	// cut off the end of it.
+	if got := byRule["CVE-2018-1000656"].Message; !strings.HasPrefix(got, "Flask 0.12.2 → 0.12.3:") {
+		t.Errorf("message = %q, want the version to move to, first", got)
 	}
 	// The more alarming answer has to be the louder one.
-	if got := byRule["CVE-2020-28493"].Message; !strings.Contains(got, "no fixed version available") {
+	if got := byRule["CVE-2020-28493"].Message; !strings.Contains(got, "no fix available") {
 		t.Errorf("message = %q, want it to say there is no fix", got)
+	}
+}
+
+// A distribution's advisory repeats the upstream project's own prefix, and Draugr names the
+// package a third time, so the line opens with three labels before it says anything.
+func TestTrivyVulnTitleDropsARepeatedLabel(t *testing.T) {
+	for _, tc := range []struct{ title, pkg, want string }{
+		// The same label twice, which loses nothing whichever one goes.
+		{"gnutls: gnutls: Authentication Bypass", "libgnutls30", "gnutls: Authentication Bypass"},
+		{"openssl: OpenSSL: Heap buffer overflow", "libssl3", "OpenSSL: Heap buffer overflow"},
+		// The package under another spelling, which Draugr already states.
+		{"python-flask: Denial of Service", "Flask", "Denial of Service"},
+		{"requests: Requests: Security bypass", "requests", "Security bypass"},
+		// A label naming something else is the advisory's own words, and stays.
+		{"sqlite: Integer Truncation", "libsqlite3-0", "sqlite: Integer Truncation"},
+		{"Something: else entirely", "openssl", "Something: else entirely"},
+	} {
+		if got := trimPackagePrefix(tc.title, tc.pkg); got != tc.want {
+			t.Errorf("trimPackagePrefix(%q, %q) = %q, want %q", tc.title, tc.pkg, got, tc.want)
+		}
 	}
 }
 
@@ -180,9 +204,9 @@ func TestTrivyVulnsOnACleanScan(t *testing.T) {
 	}
 }
 
-// realTrivyImageOutput is what Trivy 0.69.3 printed for debian:11-slim, abridged to two of its
-// 198 findings — one in the OS layer with no fix, and one in a language ecosystem on top of it,
-// because those are the two branches the operating system has to tell apart.
+// realTrivyImageOutput is what Trivy 0.69.3 printed for debian:11-slim, abridged to two of its 198
+// findings, one in the OS layer with no fix, and one in a language ecosystem on top of it, because
+// those are the two branches the operating system has to tell apart.
 //
 // Real output rather than an invention: a hand-written fixture tests the parser against the shape
 // its author imagined, which is the shape the parser already handles.
@@ -237,7 +261,7 @@ func TestParseTrivyImageNamesTheOperatingSystem(t *testing.T) {
 	}
 }
 
-// TestOperatingSystemIsNeverGuessed covers the image Trivy cannot identify — a scratch or
+// TestOperatingSystemIsNeverGuessed covers the image Trivy cannot identify, a scratch or
 // distroless one.
 //
 // GitLab's schema requires the field with a minimum length, so the temptation is to fill it. A
@@ -253,7 +277,7 @@ func TestOperatingSystemIsNeverGuessed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := rep.Results[0].OperatingSystem; got != "" {
-		t.Errorf("operating system = %q, want empty — nothing identified one", got)
+		t.Errorf("operating system = %q, want empty, nothing identified one", got)
 	}
 }
 
@@ -320,7 +344,7 @@ func TestParseTrivyAttributesFindingsToLayers(t *testing.T) {
 	}
 }
 
-// TestLayersSurviveAMissingHistory covers an image whose config carries no history — some
+// TestLayersSurviveAMissingHistory covers an image whose config carries no history, some
 // registries strip it. The position is still worth reporting, and inventing a build step for it
 // would be worse than leaving it empty.
 func TestLayersSurviveAMissingHistory(t *testing.T) {
@@ -404,5 +428,63 @@ func TestEndOfServiceLifeIsNotAssumed(t *testing.T) {
 				t.Error("claimed end of service life without an operating system to claim it for")
 			}
 		})
+	}
+}
+
+// A dependency finding says which line of the manifest declared the package.
+//
+// Trivy's SARIF writer resolves it; its JSON does not, and the JSON is what Draugr reads, for the
+// package identity the SARIF only states in prose. So the line was quietly lost in that swap, and
+// a finding pointed at `requirements.txt` and no further, leaving a reader to search the file for
+// the name Draugr already knew.
+func TestADependencyFindingNamesTheLineThatDeclaredIt(t *testing.T) {
+	dir := t.TempDir()
+	manifest := "# pinned deliberately\nFlask==0.12.2\nrequests==2.19.1\n"
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc := `{"Results":[{"Target":"requirements.txt","Type":"pip","Class":"lang-pkgs",
+	  "Vulnerabilities":[
+	    {"VulnerabilityID":"CVE-1","PkgName":"Flask","InstalledVersion":"0.12.2","Severity":"HIGH"},
+	    {"VulnerabilityID":"CVE-2","PkgName":"requests","InstalledVersion":"2.19.1","Severity":"HIGH"}
+	  ]}]}`
+
+	rep, err := parseTrivyVulns([]byte(doc), dir, plugin.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Results) != 2 {
+		t.Fatalf("results = %d", len(rep.Results))
+	}
+	for _, want := range []struct {
+		rule string
+		line int
+	}{{"CVE-1", 2}, {"CVE-2", 3}} {
+		var got int
+		for _, r := range rep.Results {
+			if r.RuleID == want.rule {
+				got = r.Location.StartLine
+			}
+		}
+		if got != want.line {
+			t.Errorf("%s at line %d, want %d", want.rule, got, want.line)
+		}
+	}
+}
+
+// A manifest that is not there degrades the finding rather than invalidating it: it still names
+// the file, which is more than nothing and all that can honestly be said.
+func TestALineIsZeroWhenTheManifestCannotBeRead(t *testing.T) {
+	doc := `{"Results":[{"Target":"requirements.txt","Type":"pip","Class":"lang-pkgs",
+	  "Vulnerabilities":[{"VulnerabilityID":"CVE-1","PkgName":"Flask","Severity":"HIGH"}]}]}`
+	rep, err := parseTrivyVulns([]byte(doc), t.TempDir(), plugin.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rep.Results[0].Location.StartLine; got != 0 {
+		t.Errorf("line = %d, want 0", got)
+	}
+	if got := rep.Results[0].Location.URI; got != "requirements.txt" {
+		t.Errorf("uri = %q, want the file it still points at", got)
 	}
 }

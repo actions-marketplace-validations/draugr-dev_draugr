@@ -3,6 +3,7 @@ package engine
 import (
 	"testing"
 
+	"github.com/draugr-dev/draugr/pkg/plugin"
 	"github.com/draugr-dev/draugr/pkg/saga"
 	"github.com/draugr-dev/draugr/pkg/sarif"
 )
@@ -30,7 +31,7 @@ func TestStampedFindingsCarryTheirComponentsClassification(t *testing.T) {
 		}
 		r := got.Results[0]
 		if [2]string{r.Exposure, r.Criticality} != want[pj.Component] {
-			t.Errorf("%s carried %q/%q, want %v — a band explained with another component's inputs",
+			t.Errorf("%s carried %q/%q, want %v, a band explained with another component's inputs",
 				pj.Component, r.Exposure, r.Criticality, want[pj.Component])
 		}
 	}
@@ -49,9 +50,9 @@ func TestAnUndeclaredComponentCarriesNoClassification(t *testing.T) {
 }
 
 // Stamping must not write through to the cached report. A cached scan is replayed for every
-// component that shares the target, so a mutated result would hand the second component the
-// first one's classification — and the finding would explain its band with numbers from
-// somewhere else entirely.
+// component that shares the target, so a mutated result would hand the second component the first
+// one's classification. And the finding would explain its band with numbers from somewhere else
+// entirely.
 func TestStampingLeavesTheCachedReportAlone(t *testing.T) {
 	e := &Engine{}
 	cached := sarif.Report{Results: []sarif.Result{{RuleID: "CVE-2020-1"}}}
@@ -60,5 +61,51 @@ func TestStampingLeavesTheCachedReportAlone(t *testing.T) {
 	})
 	if r := cached.Results[0]; r.Exposure != "" || r.Criticality != "" || r.Component != "" {
 		t.Errorf("the cached report was mutated: %+v", r)
+	}
+}
+
+// Who publishes what was scanned is stamped from the job's target, not written by whichever
+// scanner produced the finding.
+//
+// Two components sharing one repository and disagreeing about it, because that is the case the
+// per-job stamp exists for: the scan is cached and replayed, and a value written into the cached
+// report would hand the second component the first one's answer. It is also the realistic shape.
+// A vendor's repository is upstream to the team that consumes it and self to nobody.
+func TestWhoPublishesTheTargetIsStampedPerJob(t *testing.T) {
+	e := &Engine{}
+	cached := sarif.Report{Results: []sarif.Result{{RuleID: "GPL-3.0-only"}}}
+
+	consumer := e.stampJobFields(cached, PlannedJob{
+		Component: "analytics",
+		Job:       plugin.ScanJob{Target: plugin.RepositoryTarget{URL: "https://example.com/x.git", Upstream: true}},
+	})
+	if !consumer.Results[0].BuiltUpstream {
+		t.Error("a repository declared upstream produced a finding the reader is told to go and fix")
+	}
+
+	maintainer := e.stampJobFields(cached, PlannedJob{
+		Component: "platform",
+		Job:       plugin.ScanJob{Target: plugin.RepositoryTarget{URL: "https://example.com/x.git"}},
+	})
+	if maintainer.Results[0].BuiltUpstream {
+		t.Error("a repository nobody declared upstream came back as somebody else's")
+	}
+	if cached.Results[0].BuiltUpstream {
+		t.Error("the cached report was mutated, so the next component inherits this answer")
+	}
+}
+
+// A target that cannot answer leaves whatever the scanner already concluded.
+//
+// kube-bench decides per control which half of a managed cluster the provider runs, which is more
+// than the descriptor knows. A stamp that wrote `false` over that would take a true answer and
+// replace it with the absence of a declaration.
+func TestStampingNeverClearsWhatAScannerAlreadyKnew(t *testing.T) {
+	e := &Engine{}
+	got := e.stampJobFields(
+		sarif.Report{Results: []sarif.Result{{RuleID: "1.2.20", BuiltUpstream: true}}},
+		PlannedJob{Component: "platform", Job: plugin.ScanJob{Target: plugin.HostTarget{URL: "https://example.com"}}})
+	if !got.Results[0].BuiltUpstream {
+		t.Error("a scanner's own answer was overwritten by a target that does not declare one")
 	}
 }

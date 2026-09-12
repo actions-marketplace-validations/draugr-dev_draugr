@@ -7,11 +7,10 @@ order: 30
 
 # Gate PRs on new findings
 
-`draugr diff` compares two scans and classifies every finding as **new**, **fixed**, **accepted**,
-**reopened** or **unchanged** — the security delta of a change, typically a PR's head vs its base
-branch. This
-lets you gate a PR only on the findings it *introduces*, not the pre-existing backlog, so the
-gate stays adoptable where a whole-backlog gate would block every PR.
+`draugr diff` compares two scans and classifies every finding as **new**, **unaccepted**,
+**accepted**, **fixed** or **unchanged**, the security delta of a change, typically a PR's head vs its base
+branch. This lets you gate a PR only on the findings it *introduces*, not the pre-existing backlog,
+so the gate stays adoptable where a whole-backlog gate would block every PR.
 
 ## How it works
 
@@ -23,8 +22,8 @@ them:
 draugr diff base/results.sarif head/results.sarif
 ```
 
-So "the result from `main`" is a file **you produced by scanning `main`** — in the same pipeline
-run, or stored as an artifact by the last build of `main`. Nothing is fetched.
+So "the result from `main`" is a file **you produced by scanning `main`**. In the same pipeline run,
+or stored as an artifact by the last build of `main`. Nothing is fetched.
 
 That is deliberate. A CLI running in someone's pipeline should not be a service with memory of
 previous runs, because then the answer depends on state you cannot see and cannot reproduce. Two
@@ -32,51 +31,128 @@ files in, one answer out, the same answer forever.
 
 ### What counts as "the same finding"
 
-Findings are matched on **tool + rule + file + message** — deliberately *not* on the line number
-or the severity. Code moves, and a finding that slid down twelve lines is not a fix plus a new
-problem. A CVE that gets re-scored is still the same CVE.
+Findings are matched on **tool + rule + file + message**, deliberately *not* on the line number or
+the severity. Code moves, and a finding that slid down twelve lines is not a fix plus a new problem.
+A CVE that gets re-scored is still the same CVE.
+
+The message is part of it, which is why both sides have to come from the same Draugr: a release
+that rewords what a scanner reported changes the key. See [do not pay for the base scan
+twice](#do-not-pay-for-the-base-scan-twice).
 
 Whatever is in `head` and not in `base` is **new**; in `base` and not in `head` is **fixed**; in
 both is **unchanged**.
 
 Two more, for the findings somebody decided about rather than changed:
 
-- **accepted** — suppressed in `head` and not in `base`. Somebody added an exclusion, or a finding
+- **accepted**, suppressed in `head` and not in `base`. Somebody added an exclusion, or a finding
   arrived that an existing rule already covers. **Accepting a risk is not fixing it**, and this is
   the line most worth a reviewer's attention: nothing was removed, somebody chose to live with it.
-- **reopened** — suppressed in `base` and counting again in `head`. An exclusion was removed, or it
-  reached its `expires` date. Nobody introduced this finding; a decision about it lapsed, and
-  reporting it as new would lose the part that needs acting on.
+- **unaccepted**, suppressed in `base` and counting again in `head`. An exclusion was removed, or
+  it reached its `expires` date. Nobody introduced this finding and nothing about it was ever
+  fixed, which is why it is not called reopened: a decision about it ended, and that is the part
+  that needs acting on.
 
-Both are printed only when they are not zero, so a diff with neither reads exactly as it always
-has.
+Everything the change touched is one table, ranked by priority, with what happened in its own
+column. A state that did not happen is not named, so a diff with nothing accepted does not make
+anybody read past a zero:
 
 ```console
-Draugr diff — 0 new, 0 fixed, 1 accepted, 0 unchanged
+DRAUGR DIFF  pass  1 unaccepted  23 unchanged
 
-Accepted (1) — still present, somebody decided to live with them:
-  ~  high  CVE-2024-11111  requirements.txt:3
+CHANGED  1, by priority
+  Change        Priority  Severity  Rule            Scanner  Location                Upgrade
+  ! unaccepted  P1        critical  CVE-2019-20477  trivy    app/requirements.txt:4  PyYAML 5.1 → 5.2
+              command execution through python/object/apply constructor in FullLoader
+
+Gate: fails on any P1 this change introduces.
 ```
+
+`--view compact` is the same table one line each, and `--view actions` groups it into the things
+somebody would do. `--top` caps the listing, and is `0` by default because a diff is already only
+what one change did.
 
 ### Where the base comes from
 
-Three ways, in increasing order of effort:
-
-| | How | Cost |
+| | How | What it costs |
 |---|---|---|
-| **The GitHub Action** | `mode: auto` scans both sides for you | nothing to wire |
+| **The GitHub Action** | `mode: auto` scans both sides for you | nothing to wire; two scans per pull request |
 | **Scan both in one job** | check out the base, scan, check out head, scan | two scans per pull request |
-| **A stored artifact** | the last build of `main` published its `results.sarif` | one scan per pull request, but the base can be stale |
+| **A stored artifact** | the last build of `main` published its `results.sarif` | one scan, and a base that is not the merge base |
 
-The middle one works on any CI system and is the one to start with. The artifact approach is
-faster, at the cost of a base that describes whatever commit last ran rather than the actual merge
-base.
+The middle one works on any CI system and is where to start. What to do about the second scan is
+the next section, because the answer is usually not the artifact.
+
+## Do not pay for the base scan twice
+
+Scanning the base on every pull request is the honest way to get a comparable pair, and it is also
+half the pipeline's time. There are two ways to stop paying for it, and they are not equally safe.
+
+### Cache the scan, which keeps the pair honest
+
+`--cache-dir` keys each job on the scanner, its data version, the target's identity and the
+effective config, so a base scan whose inputs have not moved is answered from the cache instead of
+re-run. The base of one pull request is the base of every other pull request opened that day, so
+the first one pays and the rest do not:
+
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: .draugr/cache
+    key: draugr-${{ github.sha }}
+    restore-keys: draugr-
+- uses: draugr-dev/draugr@v0
+  with: { saga: draugr.saga.yaml, cache-dir: .draugr/cache, fail-on-new: P1 }
+```
+
+That snippet is GitHub's. [GitLab and Azure](caching-and-performance.md#on-gitlab-and-azure) cache
+the same directories with a `cache:` key and a `Cache@2` task. None of the three templates wires
+one for you, because where a cache is kept is a property of the runner rather than of the scan.
+
+The scan still runs, so the base is still the actual merge base and both sides still come from the
+same Draugr. Nothing about the comparison changes; only the work does. A cache that expired or was
+never written costs time and cannot change the answer. Read [what a hit does and
+does not promise](caching-and-performance.md#what-a-hit-does-and-does-not-promise) before sharing a
+cache across a trust boundary: **an entry is a pass**, and anybody who can write one can hand you a
+verdict nobody earned.
+
+### Store the base scan as an artifact, and know what you traded
+
+Publishing `results.sarif` from the default branch's build and fetching it on each pull request
+removes the base scan entirely. It buys the most and costs two things worth stating plainly.
+
+**The base is whatever last ran on the default branch**, not the merge base. A finding somebody
+fixed on `main` after that build reads as fixed by your change, and one they introduced reads as
+new in yours. On a busy repository that is a comment nobody believes by Wednesday.
+
+**Both sides must come from the same Draugr.** Findings are matched on what the scanners said, and
+a release that rewords a message rewords it on one side only when the stored base predates it:
+
+```console
+DRAUGR DIFF  FAIL  31 new  31 fixed  1 unchanged
+
+ new  P1 18 P2 13 P3 0 P4 0
+```
+
+That is the same tree on both sides, diffed across two Draugr versions. Every finding arrives as
+fixed *and* new, `--fail-on-new` fails the pull request on findings nobody introduced, and nothing
+in the output says why. **The tell is the symmetry**, the same count on both sides with the
+unchanged number near zero.
+
+Pin the version in both places if you take this route:
+
+```yaml
+- uses: draugr-dev/draugr@v0
+  with: { version: v0.120.0 }     # the same version that produced the stored base
+```
+
+and re-scan the base whenever you move it. The cache above avoids the whole question, which is why
+it is the one to reach for first.
 
 ## In CI: let the action do it
 
-On GitHub, you don't wire this up by hand. The first-party action's default **`mode: auto`**
-runs a diff on `pull_request` events — it scans the base and head for you and posts one sticky
-new/fixed comment — and a full scan on push. One workflow, one Saga:
+On GitHub, you don't wire this up by hand. The first-party action's default **`mode: auto`** runs a
+diff on `pull_request` events. It scans the base and head for you and posts one sticky new/fixed
+comment, and a full scan on push. One workflow, one Saga:
 
 ```yaml
 on: [push, pull_request]
@@ -97,9 +173,14 @@ jobs:
           fail-on-new: high             # gate only on findings this PR introduces
 ```
 
+`diff-view: actions` changes what the comment says, grouping the change into the things somebody
+would do rather than listing every finding. GitLab's template takes `DRAUGR_DIFF_VIEW`, and Azure's
+takes `diffView`. It belongs in the template because which shape a team wants is a property of how
+they review rather than of the change.
+
 See the [GitHub Action guide](github-action.md) for all inputs and modes. The rest of this page
-covers running `draugr diff` directly — for other CI systems, or to understand what the action
-does under the hood.
+covers running `draugr diff` directly, for other CI systems, or to understand what the action does
+under the hood.
 
 ## Produce the two SARIF files
 
@@ -112,29 +193,29 @@ draugr scan draugr.saga.yaml --no-gate -o base/    # on the base branch
 draugr scan draugr.saga.yaml --no-gate -o head/    # on the PR head
 ```
 
-**`--no-gate` on both.** These two scans exist to produce reports; the diff is the gate. Without
-it a `FAIL` verdict on the base — which any repository with a backlog will produce — exits
-non-zero and takes the whole step with it under `set -e`. It suppresses the verdict's exit code
-only: a scan that could not run still fails, so a missing report never reaches the diff disguised
-as "no new findings".
+**`--no-gate` on both.** These two scans exist to produce reports; the diff is the gate. Without it
+a `FAIL` verdict on the base, which any repository with a backlog will produce, exits non-zero and
+takes the whole step with it under `set -e`. It suppresses the verdict's exit code only: a scan that
+could not run still fails, so a missing report never reaches the diff disguised as "no new
+findings".
 
 For a complete pipeline, see [Azure Pipelines](azure-pipelines.md#gating-on-new-findings); on GitHub
 the action's `mode: auto` does all of this for you.
 
 Each scan clones the repository before reading it, so a `results.sarif` always describes a
-**committed revision** — which is what makes the two comparable, and what a reader needs in order
-to reproduce either side. It also means the pair above only differs if the two scans ran against
+**committed revision**, which is what makes the two comparable, and what a reader needs in order to
+reproduce either side. It also means the pair above only differs if the two scans ran against
 different commits: iterating locally with `scan → edit → scan` compares `HEAD` with itself and
-reports no change. Commit between the two, or set `revision` on the repository to name each
-revision explicitly. See
-[URLs and paths](../reference/saga-schema.md#where-a-repository-comes-from-urls-and-paths).
+reports no change. Commit between the two, or set `revision` on the repository to name each revision
+explicitly. See [URLs and
+paths](../reference/saga-schema.md#where-a-repository-comes-from-urls-and-paths).
 
 ## Diff and gate
 
 ```bash
 draugr diff base/results.sarif head/results.sarif                     # console delta
 draugr diff base/results.sarif head/results.sarif --format markdown   # MR comment
-draugr diff base/results.sarif head/results.sarif --fail-on-new-priority P1
+draugr diff base/results.sarif head/results.sarif --fail-on-new P1
 draugr diff base/results.sarif head/results.sarif --publish           # sticky PR comment (in CI)
 draugr diff base/results.sarif head/results.sarif --format sarif      # only the new findings, for code scanning
 draugr diff base/results.sarif head/results.sarif --format sarif --min-priority P1
@@ -142,19 +223,19 @@ draugr diff base/results.sarif head/results.sarif --format sarif --min-priority 
 
 `--format sarif` writes the **new** findings and only those, which is what a pull request's review
 comments should carry: an upload of the whole repository annotates a reviewer with hundreds of
-findings the branch did not cause. Fixed and unchanged are deliberately absent — a fixed finding is
-no longer there to annotate, and an unchanged one is the pre-existing noise this removes. The
-GitHub Action does this for you; see [`code-scanning`](github-action.md#what-code-scanning-receives).
+findings the branch did not cause. Fixed and unchanged are deliberately absent. A fixed finding is
+no longer there to annotate, and an unchanged one is the pre-existing noise this removes. The GitHub
+Action does this for you; see [`code-scanning`](github-action.md#what-code-scanning-receives).
 
 `--min-priority` narrows the **new** findings it reports, in any format, leaving fixed and
 unchanged counts alone. Narrow the diff rather than the scans it came from: a diff computed on
 filtered inputs reads every finding the filter removed as fixed.
 
-`--fail-on-new` / `--fail-on-new-priority` fail the command (non-zero exit) only for **new**
-findings at or above the given severity / priority. Findings are matched on
-`(tool, rule, file, message)` — deliberately ignoring the line number (which drifts as code
-moves) and the severity level (a re-scored finding is still the same issue), so
-genuinely-carried-over findings aren't reported as fixed + new.
+`--fail-on-new` fails the command (non-zero exit) only for **new**
+findings at or above the given severity / priority. Findings are matched on `(tool, rule, file,
+message)`, deliberately ignoring the line number (which drifts as code moves) and the severity level
+(a re-scored finding is still the same issue), so genuinely-carried-over findings aren't reported as
+fixed + new.
 
 ## Post the delta as a PR comment
 
@@ -165,16 +246,16 @@ and no-ops off a pull request:
 draugr diff base/results.sarif head/results.sarif --publish
 ```
 
-It picks the publisher from the CI system it is running on — `github-pr-comment` under GitHub
-Actions with `$GITHUB_TOKEN`, `azure-pr-comment` under Azure Pipelines with `$SYSTEM_ACCESSTOKEN`,
+It picks the publisher from the CI system it is running on, `github-pr-comment` under GitHub Actions
+with `$GITHUB_TOKEN`, `azure-pr-comment` under Azure Pipelines with `$SYSTEM_ACCESSTOKEN`,
 `gitlab-mr-comment` under GitLab CI with `$GITLAB_TOKEN`. Azure needs that variable mapped into the
 step; see [Azure Pipelines](azure-pipelines.md#a-sticky-comment). GitLab needs a token with `api`
-scope, because the `CI_JOB_TOKEN` in every job cannot post notes; see
-[reports & publishers](reports-and-publishers.md#gitlab).
+scope, because the `CI_JOB_TOKEN` in every job cannot post notes; see [reports &
+publishers](reports-and-publishers.md#gitlab).
 
 The diff keeps its **own** sticky comment, separate from the one a Saga's PR-comment publisher
-maintains. A pipeline can run both — the state of the branch, and what this pull request changed
-— and get two comments rather than one overwriting the other.
+maintains. A pipeline can run both, the state of the branch, and what this pull request changed, and
+get two comments rather than one overwriting the other.
 
 ## Severity in a diff
 
@@ -182,19 +263,25 @@ A diff reports the same **critical / high / medium / low** bands the scan report
 is read next to that report and the two have to agree.
 
 Those bands are Draugr's own, normalized across every control so a dependency CVE, a leaked secret
-and an IaC misconfiguration can share one ordered list — a CVSS-style score decides the band when
-a scanner publishes one, and the SARIF level decides it when none is published. The `error` /
+and an IaC misconfiguration can share one ordered list, a CVSS-style score decides the band when a
+scanner publishes one, and the SARIF level decides it when none is published. The `error` /
 `warning` / `note` values you will see inside a `results.sarif` file are SARIF's wire vocabulary,
-not a severity: SARIF has three of them, and they cannot express the difference between a 7.0 and
-a 9.8.
+not a severity: SARIF has three of them, and they cannot express the difference between a 7.0 and a
+9.8.
 
-`--fail-on-new` takes a **severity band** (`critical` / `high` / `medium` / `low`) — the same
-words the diff prints, and the same the scan gate takes. The SARIF levels `error`, `warning`
-and `note` are still accepted and mean `high`, `medium` and `low`.
+`--fail-on-new` takes either vocabulary, the same as the scan gate: a **priority band** (`P1`–`P4`)
+or a **severity** (`critical` / `high` / `medium` / `low`). The SARIF levels `error`, `warning` and
+`note` are still accepted and mean `high`, `medium` and `low`.
 
-Severity is still not priority. `P1`–`P4` fold in the component's declared exposure and
+Which one you write decides the question. `P1`–`P4` fold in the component's declared exposure and
 criticality, which is why a `high` on an internet-facing component outranks a `critical` on
-something nothing can reach. See [prioritization](../concepts/prioritization.md).
+something nothing can reach; a severity is what the scanner called the flaw on its own terms. A run
+asks one of the two, so writing both is refused. See
+[prioritization](../concepts/prioritization.md).
+
+A finding a second scanner reported for a flaw the first already found does not trip this gate. It
+arrives as a new result the day somebody enables a second matcher, and failing a pull request over
+copies of vulnerabilities that were already there is failing it for improving coverage.
 
 See the [CLI reference](../reference/cli.md#draugr-diff-basesarif-headsarif) for every `diff`
 flag, and [reports & publishers](reports-and-publishers.md) for both publishers.

@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -16,10 +17,9 @@ const (
 	TargetInfra      TargetKind = "infrastructure"
 )
 
-// Target is something a scanner can act on. Identity returns a stable string that
-// uniquely identifies the target for cache keying (a commit, an image digest, a
-// normalized endpoint) — two targets with the same Identity are considered the same
-// scan input.
+// Target is something a scanner can act on. Identity returns a stable string that uniquely
+// identifies the target for cache keying (a commit, an image digest, a normalized endpoint), two
+// targets with the same Identity are considered the same scan input.
 type Target interface {
 	Kind() TargetKind
 	Identity() string
@@ -33,20 +33,24 @@ type RepositoryTarget struct {
 	Paths []string
 	// Ignore removes matching paths, applied after Paths.
 	Ignore []string
-	// Remote is the repository this checkout came from, resolved from its git remote when URL is
-	// a local path. Empty when URL is already remote, or when the checkout has no remote — a
-	// repository that exists only on one machine is legitimate, and then the path is all there is.
+	// Remote is the repository this checkout came from, resolved from its git remote when URL is a
+	// local path. Empty when URL is already remote, or when the checkout has no remote, a repository
+	// that exists only on one machine is legitimate, and then the path is all there is.
 	//
 	// Set by the engine rather than by each controller, so a controller written next cannot
 	// forget it.
 	Remote string
+	// Upstream marks a repository this component uses and somebody else publishes, so a finding
+	// inside it is not the reader's to fix where it is, a denied license in its dependency tree is
+	// not one they chose, and telling them to change the code is advice they cannot take.
+	Upstream bool
 	// WorkingTree scans the checkout as it is on disk, uncommitted work included, instead of the
 	// committed revision. Set only by `draugr scan --working-tree`, and only meaningful for a
 	// local path.
 	//
-	// It exists for the loop of fixing a finding — edit, scan, see whether it went away — which
-	// otherwise needs a commit per iteration. The result is deliberately not reproducible, and
-	// says so in the report.
+	// It exists for the loop of fixing a finding, edit, scan, see whether it went away. Which
+	// otherwise needs a commit per iteration. The result is deliberately not reproducible, and says
+	// so in the report.
 	WorkingTree bool
 }
 
@@ -76,6 +80,19 @@ func (t RepositoryTarget) Identity() string {
 	return id
 }
 
+// Pinned reports whether this target's revision names one commit for good.
+//
+// A branch or a tag is a name for whatever it points at now, and an empty revision is the same
+// problem with nothing written down. Anything that has to stay true across runs, a cache entry
+// above all, is keyed on a moving name only if somebody resolves it first.
+func (t RepositoryTarget) Pinned() bool { return commitSHA.MatchString(t.Revision) }
+
+// commitSHA matches a full 40-character object name.
+var commitSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// BuiltUpstream reports who publishes this repository.
+func (t RepositoryTarget) BuiltUpstream() bool { return t.Upstream }
+
 // scopeKey renders a repository scope for an identity. Empty when nothing is restricted, so an
 // unscoped target keeps the identity it always had.
 func scopeKey(paths, ignore []string) string {
@@ -85,14 +102,29 @@ func scopeKey(paths, ignore []string) string {
 	return "paths=" + strings.Join(paths, ",") + ";ignore=" + strings.Join(ignore, ",")
 }
 
+// UpstreamPublished is an optional interface a Target implements when the descriptor may declare
+// that somebody else publishes it.
+//
+// An interface rather than a field on every target, because it is not true of every kind: a host
+// is somebody's endpoint and a cluster has `operatedBy`, which answers the same question in the
+// vocabulary that surface uses. The engine asks; a target that cannot answer is the reader's own.
+type UpstreamPublished interface {
+	// BuiltUpstream reports whether somebody else publishes this target, so a finding inside it
+	// is not the reader's to fix where it is.
+	BuiltUpstream() bool
+}
+
 // ImageTarget is a container image. Identity prefers the immutable digest.
 type ImageTarget struct {
 	Ref    string
 	Digest string
-	// BuiltUpstream marks an image this component runs and somebody else publishes, so a
-	// package inside it is not the reader's to upgrade — the fix is a newer image.
-	BuiltUpstream bool
+	// Upstream marks an image this component runs and somebody else publishes, so a package inside it
+	// is not the reader's to upgrade. The fix is a newer image.
+	Upstream bool
 }
+
+// BuiltUpstream reports who publishes this image.
+func (t ImageTarget) BuiltUpstream() bool { return t.Upstream }
 
 // Kind returns TargetImage.
 func (ImageTarget) Kind() TargetKind { return TargetImage }
@@ -112,8 +144,8 @@ func (t ImageTarget) Identity() string {
 // the honest default: a repository at a revision and a host at a URL both are.
 //
 // It exists because the cache's correctness rests on that property, and one target kind cannot
-// guarantee it. Rather than let the engine keep a list of the kinds it should distrust — a list
-// that goes stale the moment a target is added — the target says so itself.
+// guarantee it. Rather than let the engine keep a list of the kinds it should distrust. A list
+// that goes stale the moment a target is added. The target says so itself.
 type ContentAddressable interface {
 	ContentAddressed() bool
 }
@@ -207,7 +239,7 @@ func NormalizeMethods(methods []string) []string {
 	return out
 }
 
-// Marker describes a spec-driven scan without reading the document — the file, and the methods it
+// Marker describes a spec-driven scan without reading the document, the file, and the methods it
 // may use. Safe for a cache key: two scans of one endpoint exercising different methods are not
 // the same scan and must not share a result.
 func (s *HostSpec) Marker() string {
@@ -219,9 +251,9 @@ func (s *HostSpec) Marker() string {
 
 // HostAuth says how to authenticate, and deliberately cannot say what the credential is.
 //
-// It carries the *name* of an environment variable, never a value. A descriptor is committed, so
-// a token written into one is a leaked token — and the value must not reach a cache key, a report
-// or a process list either. Resolution happens in the scanner, at the moment of the scan.
+// It carries the *name* of an environment variable, never a value. A descriptor is committed, so a
+// token written into one is a leaked token. And the value must not reach a cache key, a report or
+// a process list either. Resolution happens in the scanner, at the moment of the scan.
 type HostAuth struct {
 	// Kind is "bearer" (an Authorization: Bearer header) or "header" (a named header).
 	Kind string
@@ -231,7 +263,7 @@ type HostAuth struct {
 	TokenEnv string
 }
 
-// Marker describes this authentication without disclosing it — the kind, the header it sets, and
+// Marker describes this authentication without disclosing it, the kind, the header it sets, and
 // the variable it reads. Safe to put in a cache key or a report; there is nothing secret in it.
 func (a *HostAuth) Marker() string {
 	if a == nil {
@@ -246,8 +278,8 @@ func (HostTarget) Kind() TargetKind { return TargetHost }
 // Identity returns the host URL without credentials, plus a marker when the scan authenticates.
 //
 // Two different things are at play and only one is stripped. Credentials embedded in the URL are
-// how a target is *reached* and not which target it is, so they go — same rule as a repository's.
-// A declared `auth:` block is not that: an authenticated scan sees a different application from an
+// how a target is *reached* and not which target it is, so they go, same rule as a repository's. A
+// declared `auth:` block is not that: an authenticated scan sees a different application from an
 // anonymous one, and the two results are not interchangeable. Identity feeds the cache key, so
 // leaving it out would let a scan run before the credential was configured answer for one run
 // after.

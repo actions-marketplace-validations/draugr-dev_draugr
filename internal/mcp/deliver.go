@@ -18,7 +18,7 @@ import (
 //
 // The names are what makes this useful to a caller rather than merely correct. An assistant that
 // knows a SARIF file exists can point the user at it, or read it back with summarize_report
-// instead of paying for another scan — which is the whole reason the cheap tool exists.
+// instead of paying for another scan. Which is the whole reason the cheap tool exists.
 //
 // A publisher whose destination is decided by the environment (a code-scanning upload, a
 // pull-request comment) is named by kind alone. Guessing at a URL from environment variables that
@@ -45,7 +45,7 @@ func deliver(
 		Generated: time.Now(),
 		Version:   reportVersion(),
 	}
-	if err := publish.Run(ctx, model.Config.Reports, model.Config.Publishers, data); err != nil {
+	if err := publish.Run(ctx, model.Config.Publishers, data); err != nil {
 		return nil, err
 	}
 	return deliveryLines(model), nil

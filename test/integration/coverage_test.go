@@ -28,7 +28,7 @@ func scanTo(t *testing.T, dir, saga string) (string, string) {
 }
 
 // toolsInSARIF returns the set of scanners that produced a finding, read from the report rather
-// than the console — the console shows a shortlist, and a scanner with nothing to say about a
+// than the console. The console shows a shortlist, and a scanner with nothing to say about a
 // fixture is not the same as one that never ran.
 func toolsInSARIF(t *testing.T, path string) map[string]int {
 	t.Helper()
@@ -69,8 +69,12 @@ func TestGrypeRunsBesideTrivy(t *testing.T) {
 
 	repo := newVulnRepo(t)
 	dir := t.TempDir()
-	writeFile(t, dir, "draugr.saga.yaml", fmt.Sprintf(`release: { name: grype-integration, version: "1.0" }
+	writeFile(t, dir, "draugr.saga.yaml", fmt.Sprintf(`project: grype-integration
+release: { version: "1.0" }
 config:
+  # Pinned rather than left to the default: this test is about which scanners ran, and a coverage
+  # test that moves when the default gate moves is a test about the wrong thing.
+  gate: { failOn: high }
   controllers:
     sca:
       enabled: true
@@ -85,9 +89,8 @@ components:
 
 	_, sarifPath := scanTo(t, dir, "draugr.saga.yaml")
 	tools := toolsInSARIF(t, sarifPath)
-	// The report names the tool rather than the scanner — "trivy", not "trivy-fs" — because that
-	// is what a reader recognizes. Only sca is enabled here, so each can only be its repository
-	// scanner.
+	// The report names the tool rather than the scanner, "trivy", not "trivy-fs". Because that is
+	// what a reader recognizes. Only sca is enabled here, so each can only be its repository scanner.
 	for _, want := range []string{"trivy", "grype"} {
 		if tools[want] == 0 {
 			t.Errorf("%s produced no findings, so enabling it did nothing: %v", want, tools)
@@ -103,8 +106,12 @@ func TestLicensesControlRunsOverARepository(t *testing.T) {
 
 	repo := newVulnRepo(t)
 	dir := t.TempDir()
-	writeFile(t, dir, "draugr.saga.yaml", fmt.Sprintf(`release: { name: licenses-integration, version: "1.0" }
+	writeFile(t, dir, "draugr.saga.yaml", fmt.Sprintf(`project: licenses-integration
+release: { version: "1.0" }
 config:
+  # Pinned for the reason the fixture above is: this is a coverage test, and it should not move
+  # when the default gate does.
+  gate: { failOn: high }
   controllers:
     licenses: { enabled: true }
 components:
@@ -127,17 +134,18 @@ components:
 }
 
 // TestInfrastructureControlAuditsTheCluster covers the infrastructure control against the kind
-// cluster the workflow already stands up. Its default scanner is native, so this needs no binary —
+// cluster the workflow already stands up. Its default scanner is native, so this needs no binary,
 // only a reachable cluster, which is the one thing this job has and unit tests cannot fake.
 func TestInfrastructureControlAuditsTheCluster(t *testing.T) {
 	// Asking the cluster rather than assuming one: this file's other tests run without it.
 	clientset(t)
 
-	// `ref` selects a kubeconfig context by name, and the name depends on what created the
-	// cluster — kind calls it "kind-<cluster>" — so hard-coding one would pass on the machine it
-	// was written on and fail everywhere else.
+	// `ref` selects a kubeconfig context by name, and the name depends on what created the cluster,
+	// kind calls it "kind-<cluster>". So hard-coding one would pass on the machine it was written on
+	// and fail everywhere else.
 	dir := t.TempDir()
-	writeFile(t, dir, "draugr.saga.yaml", fmt.Sprintf(`release: { name: infra-integration, version: "1.0" }
+	writeFile(t, dir, "draugr.saga.yaml", fmt.Sprintf(`project: infra-integration
+release: { version: "1.0" }
 config:
   controllers:
     infrastructure: { enabled: true }
@@ -188,10 +196,22 @@ func TestDiffGatesOnNewFindingsOnly(t *testing.T) {
 
 	if err != nil {
 		t.Errorf("two scans of one unchanged repository introduced nothing, so the gate should "+
-			"pass — inheriting a backlog must not block every change:\n%s", out)
+			"pass, inheriting a backlog must not block every change:\n%s", out)
 	}
-	if !strings.Contains(string(out), "new") && !strings.Contains(string(out), "New") {
-		t.Errorf("the diff never reported what it compared:\n%s", out)
+	// It compared two scans of one unchanged repository, so there is nothing new to name. What it
+	// has to say is that it compared something and found no change, which is the state a silent
+	// pass and a broken diff would look identical in.
+	report := string(out)
+	if !strings.Contains(report, "unchanged") {
+		t.Errorf("the diff never reported what it compared:\n%s", report)
+	}
+	if !strings.Contains(report, "Nothing changed") {
+		t.Errorf("a diff that found no change should say so rather than printing an empty listing:\n%s", report)
+	}
+	// The gate was asked for, so the verdict is stated. A pass nobody can see the rule behind is a
+	// claim rather than a result.
+	if !strings.Contains(report, "pass") || !strings.Contains(report, "Gate:") {
+		t.Errorf("the verdict and the rule it came from are missing:\n%s", report)
 	}
 }
 

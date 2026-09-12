@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -24,7 +25,7 @@ import (
 //
 // Gitleaks (offline, regex-based) is the reliable producer and is required; Trivy/Semgrep
 // enrich the scan when present. Exact CVEs/counts are never asserted (they drift with tool and
-// DB versions) — only the invariants above.
+// DB versions), only the invariants above.
 func TestZeroConfigRepoScanWithRealScanners(t *testing.T) {
 	requireTool(t, "gitleaks", "this test needs a real repository scanner to produce findings")
 	requireTool(t, "git", "the scan checks the repository out before scanning it")
@@ -41,8 +42,10 @@ func TestZeroConfigRepoScanWithRealScanners(t *testing.T) {
 
 	// --- console: priorities + severity bands (not raw SARIF levels) ---
 	console := string(combined)
-	if !strings.Contains(console, "Priorities:") {
-		t.Errorf("console output missing the Priorities line:\n%s", console)
+	// The band counts, which carry no label of their own: each names its own band, and a run that
+	// ranked nothing prints none of them.
+	if !regexp.MustCompile(`P1 \d+ P2 \d+ P3 \d+ P4 \d+`).MatchString(console) {
+		t.Errorf("console output missing the band counts:\n%s", console)
 	}
 	if !containsAny(console, "critical", "high", "medium", "low") {
 		t.Errorf("console output missing any severity band:\n%s", console)
@@ -63,7 +66,7 @@ func TestZeroConfigRepoScanWithRealScanners(t *testing.T) {
 	if len(report.Results) == 0 {
 		t.Fatal("expected real scanner findings, got 0 results")
 	}
-	// Paths must be repo-relative — never the absolute temp-checkout prefix (#188).
+	// Paths must be repo-relative, never the absolute temp-checkout prefix (#188).
 	for _, r := range report.Results {
 		uri := r.Location.URI
 		if uri == "" {
@@ -84,6 +87,17 @@ func TestZeroConfigRepoScanWithRealScanners(t *testing.T) {
 // newVulnRepo writes a tiny intentionally-vulnerable project into a fresh git repo and returns
 // its path. A leaked private key guarantees a Gitleaks finding; the manifest/code/Dockerfile
 // give Trivy and Semgrep something to find when they're installed.
+// fakePrivateKey is what the secrets control is given something to find. A test asserting a scanner
+// finds nothing asserts nothing, so the fixture has to look like the thing.
+//
+// Written once, here, and referenced from every test that needs it. The literal is what a scanner
+// matches, so a second copy is a second finding in a second file, and the exclusion that excuses
+// this one is scoped to this path. The key material is fake and was never valid anywhere.
+const fakePrivateKey = "-----BEGIN RSA PRIVATE KEY-----\n" +
+	"MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Q\n" +
+	"uKUpWnIg9pQ0j0J7bqDKT7f7fEXAMPLEfakekeymaterialnotrealABCDEF0000\n" +
+	"-----END RSA PRIVATE KEY-----\n"
+
 func newVulnRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -95,10 +109,7 @@ func newVulnRepo(t *testing.T) string {
 	write("requirements.txt", "Flask==0.12.2\nrequests==2.19.1\n")
 	write("app.py", "import os\n\n\ndef run(cmd):\n    return os.popen('ping ' + cmd).read()\n")
 	write("Dockerfile", "FROM python:3.8\nCOPY . /app\n")
-	write("id_rsa", "-----BEGIN RSA PRIVATE KEY-----\n"+
-		"MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Q\n"+
-		"uKUpWnIg9pQ0j0J7bqDKT7f7fEXAMPLEfakekeymaterialnotrealABCDEF0000\n"+
-		"-----END RSA PRIVATE KEY-----\n")
+	write("id_rsa", fakePrivateKey)
 
 	for _, args := range [][]string{
 		{"init", "--quiet"},

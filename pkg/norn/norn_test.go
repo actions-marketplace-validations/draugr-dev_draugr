@@ -15,10 +15,19 @@ func report(levels ...sarif.Level) sarif.Report {
 	return r
 }
 
-func TestEvaluateDefaultFailsOnError(t *testing.T) {
-	p := Policy{} // zero value => fail on error
+func TestTheDefaultGateIsThePriorityBand(t *testing.T) {
+	// The zero value asks what band a finding landed in, not what a scanner called it. Severity
+	// rates a flaw in the abstract; priority folds in what the descriptor says about the component
+	// it was found in, and that is the thing no scanner can compute.
+	p := Policy{}
+	if got := p.PriorityBand(); got != DefaultPriority {
+		t.Errorf("PriorityBand() = %q, want %q", got, DefaultPriority)
+	}
+	if p.GatesOnSeverity() {
+		t.Error("the zero policy gates on severity")
+	}
 	res := p.Evaluate(map[string]sarif.Report{
-		"images": report(sarif.LevelError, sarif.LevelWarning),
+		"images": reportWithPriority(sarif.LevelError, "P1"),
 	})
 	if res.Verdict != Fail {
 		t.Fatalf("verdict = %s, want fail", res.Verdict)
@@ -26,10 +35,29 @@ func TestEvaluateDefaultFailsOnError(t *testing.T) {
 	if res.Controls[0].Highest != sarif.SeverityHigh {
 		t.Errorf("highest = %s", res.Controls[0].Highest)
 	}
+	// The threshold is empty rather than a band nobody named, so a report can say which question
+	// was asked instead of showing a default as though somebody chose it.
+	if res.Controls[0].Threshold != "" {
+		t.Errorf("threshold = %q, want none: this gate is not on severity", res.Controls[0].Threshold)
+	}
+}
+
+func TestASeverityAloneNoLongerFailsTheDefaultGate(t *testing.T) {
+	// The change this makes, stated once. An error-level finding that nothing ranked used to fail
+	// the default gate on its severity; it now passes unless it lands in the band. A component
+	// that declares nothing still fails, because an unclassified component ranks at the most
+	// exposed tier, where critical and high are both P1.
+	p := Policy{}
+	res := p.Evaluate(map[string]sarif.Report{
+		"images": report(sarif.LevelError, sarif.LevelWarning),
+	})
+	if res.Verdict != Pass {
+		t.Fatalf("verdict = %s, want pass: nothing here is ranked", res.Verdict)
+	}
 }
 
 func TestEvaluatePassesBelowThreshold(t *testing.T) {
-	p := Policy{} // fail on error
+	p := Policy{FailOn: sarif.SeverityHigh}
 	res := p.Evaluate(map[string]sarif.Report{
 		"sast": report(sarif.LevelWarning, sarif.LevelNote),
 	})
@@ -63,7 +91,7 @@ func TestPerControlOverride(t *testing.T) {
 }
 
 func TestOverallFailsIfAnyControlFails(t *testing.T) {
-	p := Policy{}
+	p := Policy{FailOn: sarif.SeverityHigh}
 	res := p.Evaluate(map[string]sarif.Report{
 		"a": report(sarif.LevelNote),
 		"b": report(sarif.LevelError),
@@ -93,9 +121,9 @@ func reportWithPriority(level sarif.Level, priority string) sarif.Report {
 }
 
 func TestPriorityGateFailsBelowLevelThreshold(t *testing.T) {
-	// A note-level finding would pass a fail-on-error level gate, but its P1 priority trips
-	// the priority gate — component-aware gating in action.
-	p := Policy{FailOn: sarif.SeverityHigh, FailOnPriority: "P2"}
+	// A note-level finding is nowhere near a severity gate, and its P1 band trips the one this
+	// policy is actually asking about. Component-aware gating in action.
+	p := Policy{FailOnPriority: "P2"}
 	res := p.Evaluate(map[string]sarif.Report{
 		"images": reportWithPriority(sarif.LevelNote, "P1"),
 	})
@@ -142,7 +170,7 @@ func TestVerdictIgnoresSuppressedFindings(t *testing.T) {
 	p := Policy{FailOn: sarif.SeverityHigh, FailOnPriority: "P1"}
 	res := p.Evaluate(map[string]sarif.Report{"secrets": rep})
 	if res.Verdict != Pass {
-		t.Errorf("verdict = %v, want Pass — the only finding is suppressed", res.Verdict)
+		t.Errorf("verdict = %v, want Pass, the only finding is suppressed", res.Verdict)
 	}
 	if res.Controls[0].HighestPriority != "" {
 		t.Errorf("HighestPriority = %q, want empty", res.Controls[0].HighestPriority)
@@ -161,7 +189,7 @@ func TestVerdictStillFailsOnAnUnsuppressedFinding(t *testing.T) {
 }
 
 // Go randomizes map iteration, so an Evaluate that returned controls in map order would order
-// them differently on every run — reaching the console, report.json, and the markdown and HTML
+// them differently on every run, reaching the console, report.json, and the markdown and HTML
 // reports, and making two scans of an unchanged repository diff against each other.
 //
 // Asserted directly rather than by evaluating twice and comparing: with a handful of controls,
@@ -190,8 +218,8 @@ func TestEvaluateOrdersControlsAlphabetically(t *testing.T) {
 // TestGateJudgesTheBandTheReportPrints is the reason thresholds are severities.
 //
 // A finding carrying a CVSS score takes its band from the score, not from the level the scanner
-// wrote. Real scanners emit high-scoring findings as `warning` — a 7.8 sandbox breakout among
-// them — so a gate comparing levels passed a finding the report beside it called `high`. The
+// wrote. Real scanners emit high-scoring findings as `warning`, a 7.8 sandbox breakout among
+// them, so a gate comparing levels passed a finding the report beside it called `high`. The
 // verdict and the page have to agree about the same finding.
 func TestGateJudgesTheBandTheReportPrints(t *testing.T) {
 	// Level says warning; the score says 7.8, so the band is high.
@@ -215,5 +243,136 @@ func TestGateJudgesTheBandTheReportPrints(t *testing.T) {
 	if got := (Policy{FailOn: sarif.SeverityHigh}).Evaluate(
 		map[string]sarif.Report{"iac": lowScored}); got.Verdict != Pass {
 		t.Error("a medium-severity finding failed a gate set to high")
+	}
+}
+
+// TestOneQuestionAtATime holds the exclusivity. A policy that named a severity is asking about
+// severity, and the priority band it did not name must not fire as well: two gates mean a verdict
+// with two possible reasons, which is the thing that cannot be answered from the policy alone.
+func TestOneQuestionAtATime(t *testing.T) {
+	// Severity mode, from a global threshold.
+	sev := Policy{FailOn: sarif.SeverityCritical}
+	if band := sev.PriorityBand(); band != "" {
+		t.Errorf("PriorityBand() = %q on a severity gate, want none", band)
+	}
+	res := sev.Evaluate(map[string]sarif.Report{
+		"images": reportWithPriority(sarif.LevelWarning, "P1"),
+	})
+	if res.Verdict != Pass {
+		t.Errorf("a P1 failed a gate set to critical severity: %s", res.Verdict)
+	}
+
+	// Severity mode, from a per-control threshold alone. Naming one is still naming one.
+	per := Policy{PerControl: map[string]sarif.Severity{"images": sarif.SeverityCritical}}
+	if !per.GatesOnSeverity() {
+		t.Error("a per-control threshold did not choose severity")
+	}
+	if band := per.PriorityBand(); band != "" {
+		t.Errorf("PriorityBand() = %q, want none", band)
+	}
+
+	// Priority mode: the severity threshold is empty everywhere, including for a named control.
+	prio := Policy{FailOnPriority: "P2"}
+	for _, control := range []string{"images", "sast"} {
+		if got := prio.thresholdFor(control); got != "" {
+			t.Errorf("thresholdFor(%q) = %q on a priority gate, want none", control, got)
+		}
+	}
+}
+
+// TestAnUnnamedThresholdGatesOnNothingRatherThanEverything is the arithmetic trap under all of
+// this. An empty severity has rank 0, and AtLeast compares ranks, so an empty threshold passed
+// into the comparison is at or below every finding there is: the gate would fail on everything
+// precisely when nobody asked it to gate on severity at all.
+func TestAnUnnamedThresholdGatesOnNothingRatherThanEverything(t *testing.T) {
+	if !sarif.SeverityCritical.AtLeast("") {
+		t.Fatal("AtLeast no longer treats an empty band as rank 0; this test is checking nothing")
+	}
+	res := Policy{FailOnPriority: "P1"}.Evaluate(map[string]sarif.Report{
+		"images": report(sarif.LevelError),
+	})
+	if res.Verdict != Pass {
+		t.Errorf("verdict = %s: an unnamed severity threshold gated on everything", res.Verdict)
+	}
+}
+
+// A per-control override is the gate's own question asked of one control, so on a band gate it has
+// to be a band and it has to decide something. Written as a severity map alone, the band was parsed,
+// failed, and dropped, so the whole per-control block did nothing on the gate the product
+// recommends.
+//
+// Two controls, one overridden and one not, because an override that applied to everything would
+// pass a test with one.
+func TestAPerControlBandDecidesThatControlAndNoOther(t *testing.T) {
+	// P2 on both controls. The gate is P1, so neither fails it; `licenses` is held to P2, so it
+	// does.
+	reports := map[string]sarif.Report{
+		"licenses": {Results: []sarif.Result{{RuleID: "l", Level: sarif.LevelWarning, Priority: "P2"}}},
+		"sca":      {Results: []sarif.Result{{RuleID: "s", Level: sarif.LevelWarning, Priority: "P2"}}},
+	}
+	p := Policy{FailOnPriority: "P1", PerControlBand: map[string]string{"licenses": "P2"}}
+	res := p.Evaluate(reports)
+
+	if res.Verdict != Fail {
+		t.Fatalf("verdict = %s, want fail: licenses is held to P2 and has a P2", res.Verdict)
+	}
+	for _, c := range res.Controls {
+		want := Pass
+		if c.Control == "licenses" {
+			want = Fail
+		}
+		if c.Verdict != want {
+			t.Errorf("%s = %s, want %s", c.Control, c.Verdict, want)
+		}
+	}
+}
+
+// The other direction, so the override is not just "fail more". A control held to a looser band
+// than the gate passes a finding the gate would have failed on.
+func TestAPerControlBandCanBeLooserThanTheGate(t *testing.T) {
+	reports := map[string]sarif.Report{
+		"licenses": {Results: []sarif.Result{{RuleID: "l", Level: sarif.LevelError, Priority: "P1"}}},
+		"sca":      {Results: []sarif.Result{{RuleID: "s", Level: sarif.LevelError, Priority: "P1"}}},
+	}
+	p := Policy{FailOnPriority: "P1", PerControlBand: map[string]string{"licenses": "P4"}}
+	res := p.Evaluate(reports)
+
+	if res.Verdict != Fail {
+		t.Fatalf("verdict = %s, want fail: sca is on the P1 gate", res.Verdict)
+	}
+	for _, c := range res.Controls {
+		if c.Control == "licenses" && c.Verdict != Fail {
+			t.Errorf("licenses = %s: P4 is looser than P1, and a P1 finding is still at or above it", c.Verdict)
+		}
+	}
+}
+
+// The default gate is a band, so a policy with per-control bands and nothing else still gates.
+// GatesOnSeverity reads the severity half only, and a band override must not switch the band gate
+// off the way a severity override does.
+func TestPerControlBandsAloneStillGateOnTheDefault(t *testing.T) {
+	p := Policy{PerControlBand: map[string]string{"licenses": "P3"}}
+	if p.GatesOnSeverity() {
+		t.Error("per-control bands are not a severity gate")
+	}
+	if got := p.PriorityBand(); got != DefaultPriority {
+		t.Errorf("PriorityBand = %q, want the default %q", got, DefaultPriority)
+	}
+	reports := map[string]sarif.Report{
+		"licenses": {Results: []sarif.Result{{RuleID: "l", Level: sarif.LevelWarning, Priority: "P3"}}},
+		"sca":      {Results: []sarif.Result{{RuleID: "s", Level: sarif.LevelWarning, Priority: "P3"}}},
+	}
+	res := p.Evaluate(reports)
+	if res.Verdict != Fail {
+		t.Fatalf("verdict = %s, want fail: licenses is held to P3", res.Verdict)
+	}
+	for _, c := range res.Controls {
+		want := Pass
+		if c.Control == "licenses" {
+			want = Fail
+		}
+		if c.Verdict != want {
+			t.Errorf("%s = %s, want %s (the default gate is P1, licenses is held to P3)", c.Control, c.Verdict, want)
+		}
 	}
 }

@@ -25,8 +25,8 @@ import (
 // Scope is what a run was narrowed to, and what it therefore did not cover.
 //
 // A scoped run is a real verdict about a real subset, which is why it still gates. It is only
-// dangerous when it is indistinguishable from a whole one — so this travels into every artifact
-// the run produces, and every rendering says what was left out.
+// dangerous when it is indistinguishable from a whole one, so this travels into every artifact the
+// run produces, and every rendering says what was left out.
 type Scope struct {
 	// Components and Controls are what the caller asked for; an empty list means that axis was
 	// not restricted.
@@ -39,20 +39,15 @@ type Scope struct {
 	SkippedComponents []string `json:"skippedComponents,omitempty"`
 }
 
-// ProjectName is which project this run belongs to, falling back to the deprecated release.name
-// so a descriptor that has not moved yet still files under something.
-func (d Data) ProjectName() string {
-	if d.Project != "" {
-		return d.Project
-	}
-	return d.Release.Name
-}
+// ProjectName is which project this run belongs to.
+//
+// The one accessor. Everything that renders the name of the thing being scanned reads this, which
+// is why the field it used to fall back to could be removed in one place rather than in thirty.
+func (d Data) ProjectName() string { return d.Project }
 
 // Data is everything a reporter needs to render a scan.
 type Data struct {
-	// Project is which project this run belongs to, and what a platform files it under. Empty
-	// only for a descriptor still using the deprecated release.name, which ProjectName falls
-	// back to.
+	// Project is which project this run belongs to, and what a platform files it under.
 	Project     string
 	Release     saga.Release
 	Run         engine.Result
@@ -60,30 +55,16 @@ type Data struct {
 	MinPriority string
 	// Scope describes what the run was narrowed to, and is nil when it was not narrowed at all.
 	//
-	// A pointer so that every unscoped report — which is nearly all of them — renders and
-	// serializes exactly as it did before. Its presence is the signal: an artifact carrying a
-	// scope is a partial answer, and a consumer that finds one has been told so rather than
-	// having to infer it from a component list that looks complete.
+	// A pointer so that every unscoped report. Which is nearly all of them, renders and serializes
+	// exactly as it did before. Its presence is the signal: an artifact carrying a scope is a partial
+	// answer, and a consumer that finds one has been told so rather than having to infer it from a
+	// component list that looks complete.
 	Scope *Scope
 	// TopN caps how many findings the console "Fix first" table shows: 0 uses the default,
 	// a negative value shows all, and a positive value shows that many. Ignored by other formats.
 	TopN int
-	// GroupActions renders the fix list as actions rather than findings: one row per thing to do,
-	// each saying how many findings it clears.
-	//
-	// A reader deciding what to spend an afternoon on is choosing between actions, and a list of
-	// findings makes them do that grouping in their head. Off gives the finding-per-row listing,
-	// which is what somebody auditing a specific finding wants.
-	GroupActions bool
-	// UndeliveredReports names formats the descriptor declared that this run had nowhere to put.
-	//
-	// A descriptor can reasonably declare reports for a pipeline that has publishers, and be run
-	// locally by somebody who passes no -o. That is not an error, and it is not nothing either:
-	// two formats were named, both were skipped, and without this the run looks exactly like one
-	// that wrote them.
-	UndeliveredReports []string
-	// Evidence restores the blocks that make a run defensible — tool provenance, what each
-	// control measured against, declared effects, the scanned revision, job and cache counts.
+	// Evidence restores the blocks that make a run defensible, tool provenance, what each control
+	// measured against, declared effects, the scanned revision, job and cache counts.
 	//
 	// Off by default. A developer at a terminal is asking what to fix, and answers to questions
 	// they have not asked push the answer to the one they have off the screen. An auditor is a
@@ -102,16 +83,26 @@ type Data struct {
 	CI *ci.Context
 	// Gate records the policy the verdict was produced under.
 	//
-	// A verdict is only as meaningful as the gate behind it, and a gate can be narrowed or turned
-	// off entirely from the command line. Without this the report shows a verdict and no way to
-	// tell what it was measured against — the same gap that suppression closes for findings,
-	// where the question is never "did the scanner run" but "who decided this was acceptable".
+	// A verdict is only as meaningful as the gate behind it, and a gate can be narrowed or turned off
+	// entirely from the command line. Without this the report shows a verdict and no way to tell what
+	// it was measured against, the same gap that suppression closes for findings, where the question
+	// is never "did the scanner run" but "who decided this was acceptable".
 	Gate GateSettings
 
-	// Compact strips what only a human reads — indentation and relayed rule prose — from the
-	// machine formats (json, sarif), for a consumer that acts on the report rather than reads
-	// it. The human formats ignore it: making those harder to read is the opposite of the point.
-	Compact bool
+	// View is what the report shows and how densely, one setting rather than two that have to be
+	// combined. The zero value is ViewFindings.
+	View View
+	// Uncovered is what this descriptor declares and no enabled control examines.
+	Uncovered []Gap
+	// Suggestions are the things this particular run makes worth trying, decided by the caller
+	// because they depend on how it was invoked rather than on what it found.
+	Suggestions []Suggestion
+	// Unclassified reports that no component declares exposure or criticality.
+	//
+	// A caveat on every band in the report: with nothing declared, each component is read as public
+	// and critical, which is the most severe reading, so the bands rank severity alone. A reader
+	// who does not know that is reading a ranking as though it described their application.
+	Unclassified bool
 	// Generated and Version stamp a report with when it ran and what produced it. A report
 	// offered as evidence has to answer both; a reader who cannot tell whether they are looking
 	// at today's scan or last quarter's has nothing they can rely on. Zero values are omitted,
@@ -132,19 +123,19 @@ type Data struct {
 	Exploitability []FeedProvenance
 	// Repositories is which repository each scan read, and at which commit. Derived from what the
 	// scanners recorded rather than from the descriptor, because the descriptor usually names no
-	// revision at all — and "the default branch" is not something a reader can check out.
+	// revision at all. And "the default branch" is not something a reader can check out.
 	Repositories []RepositoryProvenance
 	// Tools records the build of each external scanner the run used, and whether Draugr can
 	// vouch for it. Empty when nothing external ran.
 	//
-	// A scan runs whatever is on PATH, which is right — an operator may have an experimental
-	// build or a fork, and blocking them would be Draugr mistaking "I cannot verify this" for
-	// "this is wrong". But a report that cannot say which build produced its findings cannot be
-	// reproduced, so the answer is to record it.
+	// A scan runs whatever is on PATH, which is right. An operator may have an experimental build or a
+	// fork, and blocking them would be Draugr mistaking "I cannot verify this" for "this is wrong".
+	// But a report that cannot say which build produced its findings cannot be reproduced, so the
+	// answer is to record it.
 	Tools []ToolBuild
-	// UnattributedFindings counts findings that belong to no component — a project-scoped
-	// control like `infrastructure` produces them. Reported alongside the component breakdown,
-	// because a breakdown that silently omits them makes the parts look like the whole.
+	// UnattributedFindings counts findings that belong to no component, a project-scoped control like
+	// `infrastructure` produces them. Reported alongside the component breakdown, because a breakdown
+	// that silently omits them makes the parts look like the whole.
 	UnattributedFindings int
 }
 
@@ -154,14 +145,70 @@ type ToolBuild struct {
 	Name string
 	// Version is what it reports, or what Draugr recorded when it installed it.
 	Version string
-	// Level is how strongly Draugr can vouch for this build: pinned, signed, checksum,
-	// unverified, or external. Not a boolean, because those are genuinely different claims — an
-	// unsigned checksum proves the download was not corrupted without proving upstream published
-	// it, and collapsing that into "unattested" discards a difference a reader may care about.
+	// Level is how strongly Draugr can vouch for this build: pinned, signed, checksum, unverified, or
+	// external. Not a boolean, because those are genuinely different claims, an unsigned checksum
+	// proves the download was not corrupted without proving upstream published it, and collapsing that
+	// into "unattested" discards a difference a reader may care about.
 	Level string
 	// Reason renders the level for someone who has not read its definition.
 	Reason string
 }
+
+// Gap is one surface a descriptor declares that no enabled control looks at.
+//
+// Carried in the report rather than left to whoever renders it, because a run that examined
+// everything except the thing a component exposes to the internet reads exactly like one that
+// examined everything, and the difference is the descriptor's own words.
+type Gap struct {
+	// Component and Surface name what was declared and went unexamined.
+	Component, Surface string
+	// Controls are the ones that would have looked at it, every one of them off.
+	Controls []string
+}
+
+// Suggestion is something a reader may try, and the reason it is worth trying.
+//
+// Two fields rather than a sentence. A sentence naming a flag has to be read whole to find out
+// whether it applies, where a column of flags is scanned for the one that does.
+type Suggestion struct {
+	// What to type, or the key to add to the descriptor.
+	What string
+	// Why, in a clause. Not an instruction: none of this is required, and a reader who already has
+	// their answer should be able to pass over the whole block.
+	Why string
+}
+
+// View is what a report shows and how densely.
+//
+// One setting rather than a shape flag and a density flag that have to be combined. The three are
+// answers to one question, what does this reader want to see, and as two flags four combinations
+// exist of which two mean the same thing. It also gives the machine formats the same word: a
+// consumer that acts on a report rather than reading it asks for the same view as somebody who
+// already knows what they are looking at.
+type View string
+
+// The views. Findings is the default, and is the one that explains itself.
+const (
+	// ViewFindings is a row per finding with what it is, and what argued with its band, underneath.
+	//
+	// The default, and the fuller one, for the reason it carries any reasoning at all: a reader
+	// meeting a ranking for the first time is deciding whether to believe it, and the line under
+	// each row is where a band accounts for itself.
+	ViewFindings View = "findings"
+	// ViewActions is a row per thing to do, each saying how many findings it clears.
+	//
+	// A reader deciding what to spend an afternoon on is choosing between actions, and a list of
+	// findings makes them do that grouping in their head. Not the default, because a list of fixes
+	// above the controls that produced them reads as instructions from a tool the reader has not
+	// yet decided to trust.
+	ViewActions View = "actions"
+	// ViewCompact is one line per finding, and in json and sarif no indentation and no relayed
+	// rule prose.
+	//
+	// For a reader who already knows what they are looking at and is asking how much there is, and
+	// for a consumer that parses rather than reads.
+	ViewCompact View = "compact"
+)
 
 // RepositoryProvenance is one repository as this run read it.
 //
@@ -173,8 +220,8 @@ type RepositoryProvenance = sarif.RepositoryRef
 type FeedProvenance struct {
 	// Name is the signal: "kev" or "epss".
 	Name string
-	// URL is where the copy came from. Empty for a file the operator supplied, which is its own
-	// useful statement — the data was brought in by hand.
+	// URL is where the copy came from. Empty for a file the operator supplied, which is its own useful
+	// statement. The data was brought in by hand.
 	URL string
 	// FetchedAt is when it was obtained. Zero for a file path, which has no fetch to record.
 	FetchedAt time.Time
@@ -188,9 +235,9 @@ type FeedProvenance struct {
 
 // ComponentVerdict is one component's outcome, judged by the same policy as the run.
 //
-// The unit a team owns, and the unit exposure and criticality are declared on — so the unit
-// someone is actually deciding about. The controls table answers "is the project shippable",
-// which is a different and usually less useful question than "is my service".
+// The unit a team owns, and the unit exposure and criticality are declared on. So the unit someone
+// is actually deciding about. The controls table answers "is the project shippable", which is a
+// different and usually less useful question than "is my service".
 type ComponentVerdict struct {
 	Name string
 	// Verdict is the run's policy applied to this component's findings alone. Computed by
@@ -201,19 +248,19 @@ type ComponentVerdict struct {
 	Controls []string
 	// Priorities counts this component's findings by band, highest first (P1…P4).
 	Priorities [4]int
-	// Findings is the total, suppressed ones excluded — the same rule the counts follow.
+	// Findings is the total, suppressed ones excluded, the same rule the counts follow.
 	Findings int
-	// Declared counts what the descriptor gave this component, by target kind. It is the
-	// denominator: "3 images not scanned" does not say whether that is all of them or three of
-	// thirty, and those are different situations — one is a component nobody looked at, the
-	// other is a gap in one that was mostly covered.
+	// Declared counts what the descriptor gave this component, by target kind. It is the denominator:
+	// "3 images not scanned" does not say whether that is all of them or three of thirty, and those
+	// are different situations. One is a component nobody looked at, the other is a gap in one that
+	// was mostly covered.
 	Declared map[string]int
 	// Unscanned is what this component has that no scanner managed to look at.
 	//
 	// A component whose every image failed to pull has had nothing examined, and without this it
-	// renders as passing with no findings — which is the report asserting something no scanner
-	// established. The same reasoning already keeps a component the scope excluded out of the
-	// pass list; a component the scan could not reach is the same situation arrived at later.
+	// renders as passing with no findings. Which is the report asserting something no scanner
+	// established. The same reasoning already keeps a component the scope excluded out of the pass
+	// list; a component the scan could not reach is the same situation arrived at later.
 	Unscanned []engine.Unscanned
 }
 
@@ -233,8 +280,8 @@ var reporters = map[string]Reporter{
 	"sarif":    sarifReporter{},
 	"vex":      vexReporter{},
 
-	// GitLab's own schemas. Delivered as build artifacts the runner collects, which is why they
-	// are reporters and not a publisher — GitLab has no endpoint to upload to.
+	// GitLab's own schemas. Delivered as build artifacts the runner collects, which is why they are
+	// reporters and not a publisher. GitLab has no endpoint to upload to.
 	"gitlab-sast": gitlabSecurityReporter{
 		format: "gitlab-sast", scanType: "sast",
 		// GitLab files infrastructure-as-code scanning under SAST, as Draugr's `iac` control is.
@@ -263,11 +310,11 @@ var reporters = map[string]Reporter{
 // StreamFormats are the formats `--format` accepts: the ones whose natural destination is a
 // stream, so a terminal, a pipe or a redirect all make sense.
 //
-// html and junit are deliberately absent. An HTML report is a styled document with its CSS
-// inlined, and printing four thousand lines of it because someone typed a plausible-looking flag
-// is not a thing to explain away — a JUnit file is read by a CI runner from a path, never by a
-// person. Both are produced with --report into an output directory, which is the only place they
-// were ever useful.
+// html and junit are deliberately absent. An HTML report is a styled document with its CSS inlined,
+// and printing four thousand lines of it because someone typed a plausible-looking flag is not a
+// thing to explain away. A JUnit file is read by a CI runner from a path, never by a person. Both
+// are produced with --report into an output directory, which is the only place they were ever
+// useful.
 //
 // Narrow on purpose. Every format offered here is one a reader has to rule out.
 var StreamFormats = []string{"console", "markdown", "json", "sarif", "vex", "template"}
@@ -325,7 +372,7 @@ func (jsonReporter) Format() string { return "json" }
 func (jsonReporter) Render(w io.Writer, d Data) error {
 	return skald.RenderJSONFor(w, d.ProjectName(), d.Release, d.Run, d.Verdict, d.MinPriority,
 		skaldFeeds(d.Exploitability), d.marshalOptions(),
-		skald.Provenance{Descriptor: d.Descriptor, CI: d.CI})
+		skald.Provenance{Descriptor: d.Descriptor, CI: d.CI, Gate: d.Gate.skald()})
 }
 
 // skaldFeeds converts the report's feed provenance into the JSON document's shape.
@@ -352,16 +399,16 @@ func (sarifReporter) Render(w io.Writer, d Data) error {
 	return skald.WriteSARIFNarrowed(w, FilterByPriority(d.Run, d.MinPriority), d.MinPriority, d.marshalOptions())
 }
 
-// FilterByPriority drops findings below the requested band, returning a copy so the caller's
-// run is untouched — the same Data is rendered in several formats and delivered to publishers.
+// FilterByPriority drops findings below the requested band, returning a copy so the caller's run is
+// untouched. The same Data is rendered in several formats and delivered to publishers.
 //
 // Findings the scanner never prioritized are kept. An empty Priority means prioritization did
 // not run for that finding, not that it ranked low, and silently dropping it would be the worst
 // reading of an unset field.
 //
-// Only the results need filtering: the emitted rules[] is derived from the results that remain,
-// so a rule nobody matched leaves with them. That is where most of the size saving comes from —
-// on Draugr's demo repository, filtering to P1 takes the compact SARIF from 82 KB to 32 KB.
+// Only the results need filtering: the emitted rules[] is derived from the results that remain, so
+// a rule nobody matched leaves with them. That is where most of the size saving comes from, on
+// Draugr's demo repository, filtering to P1 takes the compact SARIF from 82 KB to 32 KB.
 func FilterByPriority(run engine.Result, minPriority string) engine.Result {
 	if minPriority == "" {
 		return run
@@ -408,7 +455,7 @@ func erroredControls(d Data) []string {
 }
 
 func (d Data) marshalOptions() sarif.MarshalOptions {
-	return sarif.MarshalOptions{Compact: d.Compact}
+	return sarif.MarshalOptions{Compact: d.View == ViewCompact}
 }
 
 // --- shared summary used by the human reporters ---
@@ -447,7 +494,7 @@ type finding struct {
 	pkg *sarif.Package
 	// imageBuiltUpstream marks a finding in an image somebody else publishes, which changes what
 	// the reader can do about it and therefore how it groups.
-	imageBuiltUpstream bool
+	builtUpstream bool
 	// operatingSystem is the release an image finding came from, for the same reason: moving off
 	// a release past end of service life is one action for everything in that layer.
 	operatingSystem string
@@ -474,24 +521,30 @@ func (c *sevCounts) add(s sarif.Severity) {
 }
 
 type summary struct {
-	// minPriority is the band the listing was filtered to, and hidden how many findings that
-	// removed — reported so a short list next to large counts isn't mystifying.
+	// minPriority is the band the listing was filtered to, and hidden how many findings that removed,
+	// reported so a short list next to large counts isn't mystifying.
 	minPriority    string
 	hidden         int
 	verdict        norn.Verdict
 	prioritized    bool
 	p1, p2, p3, p4 int
-	bands          map[string]sevCounts // per-control severity counts
-	findings       []finding            // sorted most-urgent first
-	// escalated is how many findings a feed moved up a band. Counted over every finding, not
-	// only the ones shown: --top and --min-priority narrow the listing, and "nothing raised"
-	// has to mean nothing in the run rather than nothing on this page.
-	escalated int
+	bands          map[string]sevCounts // per-control severity counts, for a run nothing ranked
+	// controlBands is the same breakdown in the vocabulary the rest of the report speaks: how many
+	// of each band a control accounts for. The verdict, the components and the gate all talk about
+	// bands, and the control rows were the one place still answering in what a scanner called the
+	// flaw rather than in what Draugr decided about it.
+	controlBands map[string][4]int
+	findings     []finding // sorted most-urgent first
+	// bySignal is how many findings each dataset moved up a band, and floored how many a control's
+	// own rule raised. Counted over every finding, not only the ones shown: --top and
+	// --min-priority narrow the listing, and "nothing raised" has to mean nothing in the run
+	// rather than nothing on this page.
+	bySignal map[string]int
+	floored  int
 
-	// What the run could not do, and what it set aside. A report that omits these describes a
-	// thinner run rather than a broken one — and a reader cannot tell the difference, which is
-	// the reading that matters: a control whose scanner never ran found nothing because it
-	// looked at nothing.
+	// What the run could not do, and what it set aside. A report that omits these describes a thinner
+	// run rather than a broken one. And a reader cannot tell the difference, which is the reading that
+	// matters: a control whose scanner never ran found nothing because it looked at nothing.
 	scanErrors map[string][]string // per control, what stopped it completing
 	errored    []string            // controls that produced no report at all, so have no verdict row
 	// effects are what the run did to its targets beyond reading them. Recorded because a scan
@@ -530,8 +583,8 @@ func summarize(d Data) summary {
 	for _, name := range names {
 		rep := d.Run.Controls[name].Report
 		for _, res := range rep.Results {
-			// A flaw another scanner is already counted for. In the report, deliberately not
-			// a second row in the list of things to fix — the row that is there names it.
+			// A flaw another scanner is already counted for. In the report, deliberately not a second row in
+			// the list of things to fix. The row that is there names it.
 			if res.Correlated() {
 				continue
 			}
@@ -552,16 +605,25 @@ func summarize(d Data) summary {
 			}
 			if res.Priority != "" {
 				s.prioritized = true
+				at := s.controlBands[name]
 				switch prioritization.Priority(res.Priority) {
 				case prioritization.P1:
 					s.p1++
+					at[0]++
 				case prioritization.P2:
 					s.p2++
+					at[1]++
 				case prioritization.P3:
 					s.p3++
+					at[2]++
 				case prioritization.P4:
 					s.p4++
+					at[3]++
 				}
+				if s.controlBands == nil {
+					s.controlBands = map[string][4]int{}
+				}
+				s.controlBands[name] = at
 			}
 			loc := locationOf(res)
 			sev := res.Severity("")
@@ -569,7 +631,13 @@ func summarize(d Data) summary {
 			b.add(sev)
 			s.bands[name] = b
 			if res.Escalation != nil {
-				s.escalated++
+				if s.bySignal == nil {
+					s.bySignal = map[string]int{}
+				}
+				s.bySignal[res.Escalation.Signal]++
+			}
+			if res.PriorityFloor != "" {
+				s.floored++
 			}
 			s.findings = append(s.findings, finding{
 				control: name, ruleID: res.RuleID, tool: res.Tool, priority: res.Priority,
@@ -584,10 +652,10 @@ func summarize(d Data) summary {
 				level: res.Level, severity: sev,
 				helpURI: rep.HelpURI(res.RuleID),
 				score:   res.Score, hasScore: res.HasScore,
-				remediation:        res.Remediation(),
-				imageBuiltUpstream: res.ImageBuiltUpstream,
-				pkg:                res.Package,
-				operatingSystem:    res.OperatingSystem,
+				remediation:     res.Remediation(),
+				builtUpstream:   res.BuiltUpstream,
+				pkg:             res.Package,
+				operatingSystem: res.OperatingSystem,
 			})
 		}
 	}
@@ -628,22 +696,46 @@ func sortFindings(fs []finding) {
 		}
 		// Within a band, what somebody can act on comes first.
 		//
-		// Not by changing the band. Priority feeds the gate, and demoting a finding because
-		// nobody here can fix it would weaken a build gate as a side effect of annotating a
-		// descriptor — a policy change arriving as metadata, where the mechanism for "we accept
-		// this" already exists and records who decided. The risk is also unchanged: a vulnerable
-		// control plane is exactly as dangerous whether or not the fix is yours to apply.
+		// Not by changing the band. Priority feeds the gate, and demoting a finding because nobody here
+		// can fix it would weaken a build gate as a side effect of annotating a descriptor, a policy
+		// change arriving as metadata, where the mechanism for "we accept this" already exists and
+		// records who decided. The risk is also unchanged: a vulnerable control plane is exactly as
+		// dangerous whether or not the fix is yours to apply.
 		//
 		// Ordering is the honest half of it. Two findings that matter equally, and one of them
 		// has somewhere for the reader to start.
 		if ao, bo := actionableRank(a), actionableRank(b); ao != bo {
 			return ao > bo
 		}
+		// Severity before the number behind it. Not every scanner publishes a score, and ordering
+		// on the number alone sinks a critical nothing scored below every high that was, which on
+		// a list headed "fix first" is the one place that cannot be wrong. The rating the band was
+		// computed from is the comparable thing; the score refines it where both have one.
+		if sa, sb := severityRank(rankedSeverity(a)), severityRank(rankedSeverity(b)); sa != sb {
+			return sa > sb
+		}
 		if a.score != b.score {
 			return a.score > b.score
 		}
 		return levelRank(a.level) > levelRank(b.level)
 	})
+}
+
+// severityRank orders the four ratings, with an unrated finding below all of them: a scanner that
+// said nothing about how bad this is has not said it is worse than one that did.
+func severityRank(sev sarif.Severity) int {
+	switch sev {
+	case sarif.SeverityCritical:
+		return 4
+	case sarif.SeverityHigh:
+		return 3
+	case sarif.SeverityMedium:
+		return 2
+	case sarif.SeverityLow:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func levelRank(l sarif.Level) int {
@@ -670,7 +762,7 @@ type provenanceLine struct {
 // provenanceLines collects what each scanner said about the run, in control order.
 //
 // A finding answers "what is wrong". Evidence also has to answer "what was measured, and against
-// what" — and for a compliance control that second question is the one an auditor asks first. The
+// what", and for a compliance control that second question is the one an auditor asks first. The
 // benchmark is chosen from the cluster rather than stated in the descriptor, so without this the
 // report gives no way to know which standard produced it.
 func provenanceLines(d Data) []provenanceLine {
@@ -680,9 +772,19 @@ func provenanceLines(d Data) []provenanceLine {
 	}
 	sort.Strings(names)
 
+	// A reachability analyzer accounts for itself in its own block, beside the counts its
+	// statement qualifies.
+	analyzers := map[string]bool{}
+	for _, a := range d.Run.Reachability.Analyzers {
+		analyzers[a.Analyzer] = true
+	}
+
 	var out []provenanceLine
 	for _, name := range names {
 		for _, p := range d.Run.Controls[name].Report.Provenance {
+			if analyzers[p.Tool] {
+				continue
+			}
 			// The repository and revision are reported once for the run, not once per control:
 			// five controls reading one checkout is one fact, and repeating it five times in a
 			// block headed "measured against" is how a useful section becomes wallpaper.
@@ -699,6 +801,34 @@ func provenanceLines(d Data) []provenanceLine {
 	return out
 }
 
+// analyzerCoverage is what an analyzer said about how far it got, joined into one clause.
+func analyzerCoverage(d Data, analyzer string) string {
+	var said []string
+	for _, name := range sortedControlNames(d) {
+		for _, p := range d.Run.Controls[name].Report.Provenance {
+			if p.Tool != analyzer {
+				continue
+			}
+			for _, f := range p.Fields {
+				if f.Key == "coverage" {
+					said = append(said, f.Value)
+				}
+			}
+		}
+	}
+	return strings.Join(said, " · ")
+}
+
+// sortedControlNames orders the run's controls, so a report built twice reads the same.
+func sortedControlNames(d Data) []string {
+	names := make([]string, 0, len(d.Run.Controls))
+	for name := range d.Run.Controls {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Label renders the tool and version as one string, the version omitted when unknown.
 func (p provenanceLine) Label() string {
 	if p.Version == "" {
@@ -710,10 +840,10 @@ func (p provenanceLine) Label() string {
 // dedupeMessages collapses identical failures, noting how many jobs hit each.
 //
 // The engine records one entry per job, which is right: each belongs to a real job and the SARIF
-// and the JSON report should keep them. In a summary it reads differently — two components whose
+// and the JSON report should keep them. In a summary it reads differently, two components whose
 // scanner binary is missing produce the same sentence twice, and two identical lines invite the
-// reader to look for the difference between them. There isn't one: the message is the same
-// missing binary either way, and the duplicate carries nothing about which job it came from.
+// reader to look for the difference between them. There isn't one: the message is the same missing
+// binary either way, and the duplicate carries nothing about which job it came from.
 func dedupeMessages(msgs []string) []string {
 	seen := map[string]int{}
 	order := make([]string, 0, len(msgs))
@@ -733,91 +863,62 @@ func dedupeMessages(msgs []string) []string {
 	return out
 }
 
-// suppressionAttribution summarizes who accepted the suppressed findings.
+// suppressionLine renders the one-line account of what was set aside, and under `full` by whom.
 //
-// Returns the acceptors in a stable order with their counts, and how many nobody claimed.
+// Named for where the decision lives rather than opening with a count, so the lines that report an
+// acceptance all begin with the thing a reader would go and edit, and read as one set.
 //
-// The name is the point of recording it. A count of unattributed suppressions says *that* there
-// is a gap; it does not say who to ask about the rest, which is the question an auditor actually
-// arrives with — and until this, the name reached no report at all: not the console, not the
-// markdown, not even SARIF.
-func suppressionAttribution(d Data) (acceptors []string, counts map[string]int, unattributed int) {
-	counts = map[string]int{}
-	for _, cr := range d.Run.Controls {
-		for _, res := range cr.Report.Results {
-			if !res.Suppressed() || res.Imported() {
-				// An imported claim has no acceptedBy and is not unattributed either — a named
-				// supplier asserted it. Counting it here would report somebody else's signed
-				// analysis as a decision nobody signed, which is the opposite of true.
-				continue
-			}
-			if by := res.Suppression.AcceptedBy; by != "" {
-				if _, seen := counts[by]; !seen {
-					acceptors = append(acceptors, by)
-				}
-				counts[by]++
-				continue
-			}
-			unattributed++
-		}
-	}
-	sort.Strings(acceptors)
-	return acceptors, counts, unattributed
-}
-
-// suppressionLine renders the one-line account of what was set aside and by whom.
-func suppressionLine(d Data) string {
+// Who accepted it is behind `full`. A descriptor with thirty exclusions signed by eight people
+// prints eight names on one line every run, and the question they answer, who decided this was
+// acceptable, is asked of the evidence rather than of a scan somebody is reading to find out what
+// to fix. It stays in report.json and in the SARIF beside the result it justifies either way.
+func suppressionLine(d Data, full bool) string {
 	n := d.Run.Suppressed
 	if n == 0 {
 		return ""
 	}
-	line := fmt.Sprintf("%s suppressed by config.exclude", plural(n, "finding"))
+	line := fmt.Sprintf("config.exclude: %s suppressed", plural(n, "finding"))
+	if !full {
+		return line
+	}
 	// Only named when there is more than one, so a descriptor that is a single file reads exactly
 	// as it did before fragments existed. The breakdown answers a question that only arises once
 	// the exclusions live somewhere other than the file you opened.
 	if sources := suppressionSources(d); len(sources) > 1 {
 		var where []string
-		for _, s := range sources {
-			where = append(where, fmt.Sprintf("%d from %s", s.n, s.name))
+		for _, src := range sources {
+			where = append(where, fmt.Sprintf("%d from %s", src.n, src.name))
 		}
-		line = fmt.Sprintf("%s suppressed — %s", plural(n, "finding"), strings.Join(where, ", "))
+		line = fmt.Sprintf("config.exclude: %s suppressed · %s",
+			plural(n, "finding"), strings.Join(where, ", "))
 	}
-	acceptors, counts, unattributed := suppressionAttribution(d)
-
-	var parts []string
-	for _, who := range acceptors {
-		parts = append(parts, fmt.Sprintf("%d accepted by %s", counts[who], who))
-	}
-	if unattributed > 0 {
-		// A blank is an answer worth seeing: an exclusion nobody signed is one nobody can be
-		// asked about.
-		parts = append(parts, fmt.Sprintf("%d unattributed", unattributed))
-	}
-	if len(parts) > 0 {
-		line += " — " + strings.Join(parts, ", ")
-	}
+	// Who accepted what used to be appended here, and it is a table now: one row per decision,
+	// carrying the reason as well as the name, which a clause in a sentence has no room for. A
+	// count and a roll call of the same findings on one line is the same fact twice.
 	return line
 }
 
-// importedLine renders the one-line account of what a supplier's own analysis excused.
+// importedLine renders the one-line account of what a supplier's own analysis excused, and under
+// `full` which supplier said so.
 //
-// Its own line rather than folded into the suppression count, because the two answer the
-// auditor's question differently. "We accepted this" and "our supplier states it does not apply"
-// are different sentences with different people at the end of them, and a total that merges them
-// can only support the weaker one.
-func importedLine(d Data) string {
+// The same shape as the exclusion line, for the same reason: three suppliers named on one line is
+// three names a reader scans past on every run, and it is the evidence they belong to.
+func importedLine(d Data, full bool) string {
 	n := d.Run.Imported
 	if n == 0 {
 		return ""
 	}
+	line := fmt.Sprintf("VEX: %s excused", plural(n, "finding"))
+	if !full {
+		return line
+	}
 	authors, counts := importedAttribution(d)
-	line := fmt.Sprintf("%s excused by a supplier's VEX", plural(n, "finding"))
 	var parts []string
 	for _, who := range authors {
 		parts = append(parts, fmt.Sprintf("%d asserted by %s", counts[who], who))
 	}
 	if len(parts) > 0 {
-		line += " — " + strings.Join(parts, ", ")
+		line += " · " + strings.Join(parts, ", ")
 	}
 	return line
 }
@@ -828,15 +929,16 @@ func importedLine(d Data) string {
 // count is its own: the three answer the auditor's question with different people at the end of
 // them. A descriptor rule was written where whoever owns the descriptor can see it. A supplier's
 // claim is answerable by the supplier. This one was written by whoever was editing the file, and
-// nobody else necessarily knows it is there — which is exactly why it is the one most worth
+// nobody else necessarily knows it is there. Which is exactly why it is the one most worth
 // printing.
 func silencedLine(d Data) string {
 	n := d.Run.Silenced
 	if n == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s silenced in the source by a scanner directive — nobody signed these",
-		plural(n, "finding"))
+	// Named for where it lives, like the others, and keeping what makes it the weakest of the
+	// three: a directive in the code is an acceptance with no author and no date.
+	return fmt.Sprintf("source directives: %s silenced, and nobody signed them", plural(n, "finding"))
 }
 
 // alsoFoundBy is what the other scanners said about this same flaw.
@@ -851,7 +953,7 @@ func alsoFoundBy(res sarif.Result) []sarif.Observation {
 // disagree about how bad it is.
 //
 // Said rather than hidden, because two tools agreeing is itself a signal, and because a reader who
-// enabled a second scanner should be able to see it working — without this the row looks exactly
+// enabled a second scanner should be able to see it working, without this the row looks exactly
 // like a run with one scanner and the second appears to have found nothing.
 //
 // A rating is shown only when it differs from the one being counted. Where the scanners agree,
@@ -884,11 +986,11 @@ func ratingOf(o sarif.Observation) string {
 // reachabilityBlock reports what reachability analysis concluded, as a labeled block: a row per
 // analyzer, then the caveats that apply.
 //
-// A block rather than a sentence, and a row per analyzer rather than a total, because more than
-// one analyzer can run and they do not answer the same question the same way — one may follow a
-// call graph and another a framework's routing, over different ecosystems. Summed into a single
-// figure they would read as one verdict of uniform strength, which is the claim readers are told
-// to be most careful of.
+// A block rather than a sentence, and a row per analyzer rather than a total, because more than one
+// analyzer can run and they do not answer the same question the same way, one may follow a call
+// graph and another a framework's routing, over different ecosystems. Summed into a single figure
+// they would read as one verdict of uniform strength, which is the claim readers are told to be
+// most careful of.
 //
 // The caveats are printed once beneath the rows rather than per analyzer, because they describe
 // what Draugr does with a verdict, which does not vary by tool.
@@ -904,51 +1006,66 @@ func reachabilityBlock(d Data) (rows []string, notes []string) {
 		}
 	}
 	for _, a := range r.Analyzers {
+		// An analyzer that decided nothing has one thing to say, and it is not a pair of zeros.
+		// The counts are the answer where there is one; where there is none, why there is none is
+		// the answer, and printing both put a sentence about finding no module beside a count of
+		// what was decided, which reads as the report contradicting itself.
+		if a.Reachable+a.Unreachable+a.Unknown == 0 {
+			said := analyzerCoverage(d, a.Analyzer)
+			if said == "" {
+				said = "nothing it could analyze"
+			}
+			rows = append(rows, fmt.Sprintf("%-*s  %s", width, a.Analyzer, said))
+			continue
+		}
 		row := fmt.Sprintf("%-*s  %d reachable, %d unreachable", width, a.Analyzer, a.Reachable, a.Unreachable)
 		if a.Unknown > 0 {
-			row += fmt.Sprintf(", %d undetermined", a.Unknown)
+			row += fmt.Sprintf(", %d unknown", a.Unknown)
 		}
 		if a.Contributed > 0 {
 			row += fmt.Sprintf(" (%s only it reported)", plural(a.Contributed, "finding"))
 		}
 		rows = append(rows, row)
 	}
-	notes = append(notes, "Unreachable findings are ranked down in priority, not removed from the report.")
 	if r.Unknown > 0 {
 		// Named whenever there is any, because it is the qualifier on everything above it: an
 		// analyzer that could not cover a dependency has not found it safe.
-		notes = append(notes, "Undetermined findings were not analyzed and are ranked as reported.")
+		//
+		// "unknown" rather than a second word for it. It is the value the descriptor, the schema
+		// and `report.json` all carry, and a reader who meets one word in the terminal and goes
+		// looking for it in the documentation should find the same one.
+		notes = append(notes, "Unknown means the analyzer did not cover it. Those are ranked as reported.")
 	}
 	return rows, notes
 }
 
-// reachabilityNote is the line under a finding saying that reachability moved its band, or named
-// the path that keeps it where it is. Empty when analysis had nothing to say about it.
+// reachabilityPath is the line under a finding naming the call path that keeps it where it is, or
+// "" where analysis had nothing to say.
 //
-// The counterpart of escalationNote, and it exists for the same reason: a band a reader cannot
-// account for is one they have to take on trust, and the ranking is the thing they are being
-// asked to act on. Downward movement needs it most — a high-severity finding sitting low is the
-// one somebody will ask about.
-func reachabilityNote(r *sarif.Reachability) string {
-	if r == nil {
+// Only the reachable verdict, because that is the one with something to add: nothing moved, and
+// the reason the finding stands is a path through the reader's own code. A verdict that lowered a
+// band is marked on the row instead, and says who lowered it.
+func reachabilityPath(r *sarif.Reachability) string {
+	if r == nil || r.State != sarif.ReachabilityReachable {
 		return ""
 	}
-	switch r.State {
-	case sarif.ReachabilityReachable:
-		out := "→ reachable"
-		if p := shortestCallPath(r.Paths); p != "" {
-			out += ": " + p
-		}
-		return out + attribution(r)
-	case sarif.ReachabilityUnreachable:
-		if r.RankedAs == "" {
-			// Already at the lowest band, so nothing moved and there is nothing to account for.
-			return ""
-		}
-		return "↓ ranked as " + string(r.RankedAs) + " — the vulnerable code is never called" + attribution(r)
-	default:
+	out := "reachable"
+	if p := shortestCallPath(r.Paths); p != "" {
+		out += ": " + p
+	}
+	return out + attribution(r)
+}
+
+// unreachableCredit names who decided a finding is never called, and when.
+//
+// The mark on the row says the band was lowered; this is the part a reader would otherwise have to
+// take on trust. A call graph does not see reflection or code generated tomorrow, so which
+// analyzer ran and which day it ran are what make the claim one somebody can argue with.
+func unreachableCredit(r *sarif.Reachability) string {
+	if r == nil || r.State != sarif.ReachabilityUnreachable || r.RankedAs == "" {
 		return ""
 	}
+	return strings.TrimSuffix(strings.TrimPrefix(attribution(r), " ("), ")")
 }
 
 // attribution names the analyzer and the day it ran. A reachability verdict describes one
@@ -1074,7 +1191,7 @@ func withoutRepositoryFields(fields []sarif.Field) []sarif.Field {
 // actionableRank orders findings of equal priority by whether the reader can do something.
 //
 // Three steps rather than a boolean, because "upgrade this" and "move the release underneath you"
-// are both actions and the first is smaller. Nothing here changes what a finding is worth — only
+// are both actions and the first is smaller. Nothing here changes what a finding is worth, only
 // which of two equally urgent ones is worth reading first.
 func actionableRank(f finding) int {
 	switch f.remediation {
@@ -1085,8 +1202,8 @@ func actionableRank(f finding) int {
 	case sarif.RemediationNone:
 		return 1
 	case sarif.RemediationExternal:
-		// Still reported, still counted, still failing the gate if policy says so — last within
-		// its band because the reader cannot start here.
+		// Still reported, still counted, still failing the gate if policy says so, last within its band
+		// because the reader cannot start here.
 		return 0
 	default:
 		return 1
@@ -1101,12 +1218,38 @@ func actionableRank(f finding) int {
 type GateSettings struct {
 	// Threshold is the severity band that fails a control by default.
 	Threshold sarif.Severity
-	// PerControl overrides Threshold for named controls.
+	// PerControl overrides Threshold for named controls, on a severity gate.
 	PerControl map[string]sarif.Severity
 	// FailOnPriority additionally fails on a priority band, when set.
 	FailOnPriority string
+	// PerControlBand overrides the band for named controls, on a band gate. The other half of
+	// PerControl: a threshold only applies in the vocabulary its gate asks in, so exactly one of
+	// these is ever populated.
+	PerControlBand map[string]string
 	// Disabled is --no-gate: the verdict is reported and the command still exits 0.
 	Disabled bool
+}
+
+// GateForReport is the run's gate in the shape the JSON document states it, for a caller writing
+// that document through skald rather than through this package's reporters.
+func (d Data) GateForReport() *skald.Gate { return d.Gate.skald() }
+
+// skald renders the gate into the JSON document's shape, so that document states the rule its
+// verdict came from rather than only the outcome.
+//
+// The zero value is a real gate, our default threshold, no overrides, not an absent one, so it
+// converts like any other. A document that omits the block was written by a caller that never had
+// the policy, which is a different thing and reads as one.
+func (g GateSettings) skald() *skald.Gate {
+	return &skald.Gate{
+		Policy: norn.Policy{
+			FailOn:         g.Threshold,
+			PerControl:     g.PerControl,
+			FailOnPriority: g.FailOnPriority,
+			PerControlBand: g.PerControlBand,
+		},
+		Disabled: g.Disabled,
+	}
 }
 
 // weakened reports whether the gate lets through something the default gate would have caught.
@@ -1115,20 +1258,86 @@ type GateSettings struct {
 // than a reader expects, which is visible in the verdict itself; a looser one produces a pass that
 // looks like every other pass.
 func (g GateSettings) weakened() bool {
-	if g.Disabled {
+	// The only case that can still be ranked. The command exits 0 on a verdict of fail, so
+	// anything reading the exit code is told the opposite of what the report says.
+	//
+	// Nothing else is comparable any more. A severity gate and the default priority gate ask
+	// different questions, and which is the looser depends on the component: `failOn: critical`
+	// catches less than P1 where a component is unclassified and more where it is restricted, so
+	// there is no ordering to call one a weakening of the other. Ranking them anyway would put a
+	// caveat on runs that do not have one and leave it off runs that do.
+	return g.Disabled
+}
+
+// chosen reports whether this gate is anything other than the default.
+//
+// What decides whether the rule is printed without being asked for. The default needs no stating:
+// it is what a reader who has configured nothing already has. Anything else is a decision that
+// qualifies every pass above it, and one a reader cannot recover from the verdict alone, since the
+// two modes answer different questions rather than the same question at different strictness.
+func (g GateSettings) chosen() bool {
+	if g.Disabled || g.Threshold != "" || len(g.PerControl) > 0 {
 		return true
 	}
-	if g.Threshold != "" && g.Threshold.Rank() > sarif.SeverityHigh.Rank() {
-		return true
-	}
-	effective := g.Threshold
-	if effective == "" {
-		effective = sarif.SeverityHigh
-	}
-	for _, band := range g.PerControl {
-		if band != "" && band.Rank() > effective.Rank() {
-			return true
+	return g.FailOnPriority != "" && g.FailOnPriority != norn.DefaultPriority
+}
+
+// decision is one acceptance: who made it, why, when it lapses, and how many findings it covers.
+type decision struct {
+	by      string
+	reason  string
+	expires string
+	n       int
+}
+
+// decisions groups suppressed findings by the decision that set them aside.
+//
+// The account an auditor comes for, and the one a single count cannot give: "4 findings suppressed
+// · 2 accepted by A, 1 accepted by B, 1 unattributed" is four facts in one sentence and says
+// nothing about why any of them was acceptable, though every suppressed finding carries the reason.
+//
+// Keyed on who, why and until when together, because those three are what makes two suppressions
+// one decision. Two rules with the same reason and the same signature really are one decision
+// spelled twice; the same reason accepted by two people is two.
+//
+// Imported claims are excluded. A supplier's analysis is not a decision anybody here made, and
+// counting it among them answers the auditor's question with the wrong name.
+func decisions(d Data) []decision {
+	index := map[string]*decision{}
+	var order []*decision
+	for _, cr := range d.Run.Controls {
+		for _, res := range cr.Report.Results {
+			if !res.Suppressed() || res.Imported() {
+				continue
+			}
+			by := res.Suppression.AcceptedBy
+			if by == "" {
+				by = "unattributed"
+			}
+			key := by + "\x00" + res.Suppression.Justification + "\x00" + res.Suppression.Expires
+			if got, ok := index[key]; ok {
+				got.n++
+				continue
+			}
+			dec := &decision{
+				by: by, reason: res.Suppression.Justification,
+				expires: res.Suppression.Expires, n: 1,
+			}
+			index[key] = dec
+			order = append(order, dec)
 		}
 	}
-	return false
+	// Most findings first, then by who, so the order is a property of the run rather than of map
+	// iteration and two readings of one report agree.
+	sort.SliceStable(order, func(i, j int) bool {
+		if order[i].n != order[j].n {
+			return order[i].n > order[j].n
+		}
+		return order[i].by < order[j].by
+	})
+	out := make([]decision, 0, len(order))
+	for _, dec := range order {
+		out = append(out, *dec)
+	}
+	return out
 }

@@ -20,13 +20,13 @@ func (partsOnlyGen) Generate(_ context.Context, component string, t plugin.Targe
 // assemblingGen also implements sbom.Assembler.
 type assemblingGen struct{ partsOnlyGen }
 
-func (assemblingGen) Assemble(_ saga.Release, f saga.SBOMFormat, _ []sbom.Document) (sbom.Document, error) {
+func (assemblingGen) Assemble(_ string, _ saga.Release, f saga.SBOMFormat, _ []sbom.Document) (sbom.Document, error) {
 	return sbom.Document{Project: true, Format: f, Bytes: []byte("{assembled}")}, nil
 }
 
 func scopeModel(scope saga.SBOMScope) saga.Model {
 	return saga.Model{
-		Release: saga.Release{Name: "acme", Version: "1.0.0"},
+		Release: saga.Release{Version: "1.0.0"},
 		Config:  saga.Config{SBOM: &saga.SBOMConfig{Enabled: true, Scope: scope}},
 		Components: []saga.Component{{
 			Name: "api", Criticality: "supporting", Exposure: "internal",

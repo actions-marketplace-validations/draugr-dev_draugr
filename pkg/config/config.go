@@ -7,7 +7,7 @@
 //
 // This file describes the machine or the organization running the scan: which build of a scanner
 // to install, and what a control should default to before any project says otherwise. Those want
-// to be *uniform*, and putting them in a Saga makes them diverge silently — a descriptor that can
+// to be *uniform*, and putting them in a Saga makes them diverge silently. A descriptor that can
 // pin its own scanner version is a descriptor that can downgrade one until a finding disappears.
 //
 // See https://github.com/draugr-dev/draugr/issues/129.
@@ -72,9 +72,9 @@ type PublishSettings struct {
 	//
 	//	~/.draugr/config.yaml -> ./draugr.config.yaml -> $DRAUGR_API_URL -> url: in the Saga
 	//
-	// Ambient-broad, ambient-narrow, ambient-immediate, then explicit — and explicit wins. An
-	// environment variable is context; a url somebody wrote in a descriptor is intent, and
-	// context does not override intent.
+	// Ambient-broad, ambient-narrow, ambient-immediate, then explicit. And explicit wins. An
+	// environment variable is context; a url somebody wrote in a descriptor is intent, and context
+	// does not override intent.
 	//
 	// No token here, and there never will be. This file is committed alongside a project, and a
 	// credential in it is a credential in somebody's git history.
@@ -83,9 +83,10 @@ type PublishSettings struct {
 
 // OutputSettings configures how the console renders a run. Each has a `--flag` that overrides it.
 type OutputSettings struct {
-	// Group is how the fix list is organized: "action" (one row per thing to do) or "none".
-	Group string `yaml:"group,omitempty"`
-	// Evidence also prints what stands behind the verdict — tool provenance, what each control
+	// View is what a console report shows: "findings" (a row each, with what argued with the band
+	// under it), "actions" (a row per thing to do) or "compact" (one line each).
+	View string `yaml:"view,omitempty"`
+	// Evidence also prints what stands behind the verdict, tool provenance, what each control
 	// measured against, the scanned revision, what the run cost.
 	Evidence bool `yaml:"evidence,omitempty"`
 	// Top caps how many rows the fix list shows. Zero means the built-in default rather than
@@ -100,8 +101,8 @@ type CacheSettings struct {
 	// somebody should opt into.
 	Dir string `yaml:"dir,omitempty"`
 	// TTL is how long an entry stays usable. Zero means the built-in default rather than "no
-	// expiry" — a config file that omits a field is not asking for entries that never expire.
-	// Set `ttl: 0s` explicitly for that.
+	// expiry", a config file that omits a field is not asking for entries that never expire. Set
+	// `ttl: 0s` explicitly for that.
 	TTL time.Duration `yaml:"ttl,omitempty"`
 	// ReadOnly serves entries without writing them, for a run whose results the next run should
 	// not trust.
@@ -131,7 +132,7 @@ type Resolved struct {
 
 // Load reads the configuration in effect.
 //
-// An explicit path — `--config` or DRAUGR_CONFIG — is used *alone*. Explicit means explicit: a
+// An explicit path. `--config` or DRAUGR_CONFIG. Is used *alone*. Explicit means explicit: a
 // runner image that names a config expects that config, not that one layered over whatever
 // happens to be in the working directory.
 //
@@ -187,7 +188,7 @@ func loadFile(path string) (File, error) {
 //
 // Strict: an unknown key is an error rather than something ignored. A misspelled setting that is
 // silently dropped is a setting somebody believes is in force, and this file exists to make
-// behavior uniform — a typo that quietly opts one machine out defeats the point of having it.
+// behavior uniform, a typo that quietly opts one machine out defeats the point of having it.
 func Parse(data []byte, path string) (File, error) {
 	var f File
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
@@ -207,7 +208,7 @@ func Parse(data []byte, path string) (File, error) {
 // merge lays b over a, most specific winning per key.
 //
 // Field by field, and every field has to be named here. A new one added to File and forgotten is
-// dropped on every load — not overridden, not defaulted, just absent, with the file on disk
+// dropped on every load, not overridden, not defaulted, just absent, with the file on disk
 // plainly containing it and `config show` reporting that it sets nothing. TestMergeCarriesEvery
 // Field walks the struct so the omission fails a test rather than a user's afternoon.
 func merge(a, b File) File {
@@ -250,8 +251,8 @@ func merge(a, b File) File {
 	}
 
 	out.Output = a.Output
-	if b.Output.Group != "" {
-		out.Output.Group = b.Output.Group
+	if b.Output.View != "" {
+		out.Output.View = b.Output.View
 	}
 	if b.Output.Evidence {
 		out.Output.Evidence = true

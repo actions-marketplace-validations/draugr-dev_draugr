@@ -20,7 +20,7 @@ import (
 // what it read may be stale.
 func TestBothListingsCarryTheReceipts(t *testing.T) {
 	base := Data{
-		Release: saga.Release{Name: "app", Version: "1.0"},
+		Release: saga.Release{Version: "1.0"},
 		Verdict: norn.Result{Verdict: norn.Fail},
 		Run: engine.Result{
 			Effects: []plugin.Effect{{Kind: "network", Detail: "sent requests to a live endpoint"}},
@@ -41,7 +41,9 @@ func TestBothListingsCarryTheReceipts(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			d := base
-			d.GroupActions = grouped
+			if grouped {
+				d.View = ViewActions
+			}
 			var buf bytes.Buffer
 			if err := (consoleReporter{}).Render(&buf, d); err != nil {
 				t.Fatal(err)
@@ -52,8 +54,8 @@ func TestBothListingsCarryTheReceipts(t *testing.T) {
 			if !strings.Contains(out, "sent requests to a live endpoint") {
 				t.Errorf("the effects record is missing:\n%s", out)
 			}
-			// Whether what was read may be stale. The caveat counts rather than names — the rows
-			// carry which — so this asserts it reached the reader, not that it listed anything.
+			// Whether what was read may be stale. The caveat counts rather than names, the rows carry
+			// which, so this asserts it reached the reader, not that it listed anything.
 			if !strings.Contains(out, "from cache") {
 				t.Errorf("the cache caveat is missing:\n%s", out)
 			}

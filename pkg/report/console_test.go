@@ -16,9 +16,9 @@ func TestUnpinnedCacheLine(t *testing.T) {
 		t.Errorf("nothing reused from a tag-keyed entry should print nothing, got %q", got)
 	}
 
-	// A count, not a list. The rows carry the mark and say which findings rest on a tag, so
-	// naming the references again answers a question already answered — and on a descriptor with
-	// dozens of images it is a list nobody reads at the foot of the one they do.
+	// A count, not a list. The rows carry the mark and say which findings rest on a tag, so naming
+	// the references again answers a question already answered, and on a descriptor with dozens of
+	// images it is a list nobody reads at the foot of the one they do.
 	got := unpinnedCacheLine([]string{"alpine:3.19", "acme/api:latest"})
 	if !strings.Contains(got, "2 images") {
 		t.Errorf("want the scale, got: %s", got)
@@ -46,7 +46,7 @@ func TestUnpinnedCacheLine(t *testing.T) {
 // only that the function can build it.
 func TestConsoleSaysWhenAResultCameFromATagKeyedEntry(t *testing.T) {
 	d := Data{
-		Release: saga.Release{Name: "app", Version: "1.0.0"},
+		Release: saga.Release{Version: "1.0.0"},
 		Run: engine.Result{
 			Stats: engine.Stats{Jobs: 1, CacheHits: 1, UnpinnedCacheHits: []string{"alpine:3.19"}},
 		},
@@ -55,9 +55,9 @@ func TestConsoleSaysWhenAResultCameFromATagKeyedEntry(t *testing.T) {
 	if err := (consoleReporter{}).Render(&buf, d); err != nil {
 		t.Fatal(err)
 	}
-	// The caveat reaches the reader. Which entry it was is on the rows that carry the mark, and
-	// on a run with no findings to mark it is in the JSON and in --evidence — repeating it here
-	// costs every reader with dozens of images a list they do not read.
+	// The caveat reaches the reader. Which entry it was is on the rows that carry the mark, and on a
+	// run with no findings to mark it is in the JSON and in --evidence. Repeating it here costs every
+	// reader with dozens of images a list they do not read.
 	if !strings.Contains(buf.String(), "from cache") {
 		t.Errorf("the console never told the reader a result rested on a tag:\n%s", buf.String())
 	}
@@ -74,13 +74,13 @@ func TestRunLineReportsWaitingOnce(t *testing.T) {
 			name: "waiting, with nothing else to report",
 			st: engine.Stats{Jobs: 17, Duration: 18200 * time.Millisecond,
 				ToolWaits: map[string]time.Duration{"trivy": 11 * time.Second}},
-			want: "Ran 17 jobs in 18.2s — 11s waiting for the trivy cache.",
+			want: "Ran 17 jobs in 18.2s · 11s waiting for the trivy cache.",
 		},
 		{
 			name: "waiting, alongside a saving",
 			st: engine.Stats{Jobs: 17, Duration: 18200 * time.Millisecond, CacheHits: 4,
 				ToolWaits: map[string]time.Duration{"trivy": 11 * time.Second}},
-			want: "Ran 17 jobs in 18.2s — 4 from cache, 11s waiting for the trivy cache.",
+			want: "Ran 17 jobs in 18.2s · 4 from cache · 11s waiting for the trivy cache.",
 		},
 		{
 			// Too short to perceive, so it explains nothing and only competes with the findings.
@@ -93,7 +93,7 @@ func TestRunLineReportsWaitingOnce(t *testing.T) {
 			name: "two tools are named in a stable order",
 			st: engine.Stats{Jobs: 9, Duration: 30 * time.Second,
 				ToolWaits: map[string]time.Duration{"trivy": 8 * time.Second, "grype": 3 * time.Second}},
-			want: "Ran 9 jobs in 30s — 3s waiting for the grype cache, 8s waiting for the trivy cache.",
+			want: "Ran 9 jobs in 30s · 3s waiting for the grype cache, 8s waiting for the trivy cache.",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -142,7 +142,7 @@ func TestWrapMessageElidesAtAWordBoundary(t *testing.T) {
 // verdict of FAIL, so anything reading the exit code is told the opposite of what the report says.
 func TestGateOffIsSaidInTheDefaultView(t *testing.T) {
 	d := Data{
-		Release: saga.Release{Name: "app", Version: "1.0.0"},
+		Release: saga.Release{Version: "1.0.0"},
 		Gate:    GateSettings{Threshold: "high", Disabled: true},
 	}
 	var buf bytes.Buffer
@@ -160,9 +160,11 @@ func TestGateOffIsSaidInTheDefaultView(t *testing.T) {
 // TestADefaultGateSaysNothingUntilAsked. A verdict under the default gate is the ordinary case,
 // and a line restating it on every scan is one more thing between a reader and the findings.
 func TestADefaultGateSaysNothingUntilAsked(t *testing.T) {
+	// Nothing named is the default gate, which is the priority band. A reader who configured
+	// nothing already has it, so stating it on every run spends a line on news nobody needs.
 	d := Data{
-		Release: saga.Release{Name: "app", Version: "1.0.0"},
-		Gate:    GateSettings{Threshold: "high"},
+		Release: saga.Release{Version: "1.0.0"},
+		Gate:    GateSettings{},
 	}
 	var buf bytes.Buffer
 	if err := (consoleReporter{}).Render(&buf, d); err != nil {
@@ -177,7 +179,8 @@ func TestADefaultGateSaysNothingUntilAsked(t *testing.T) {
 	if err := (consoleReporter{}).Render(&buf, d); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), "Gate: fails on high") {
+	// Including the default, because "the default" is an answer only when the report gives it.
+	if !strings.Contains(buf.String(), "Gate: fails on P1") {
 		t.Errorf("--evidence should state the gate whatever it is:\n%s", buf.String())
 	}
 }
@@ -198,13 +201,13 @@ func TestALoosenedGateIsSaidWithoutAsking(t *testing.T) {
 		{
 			name: "one control let off",
 			gate: GateSettings{Threshold: "high", PerControl: map[string]sarif.Severity{"licenses": "critical"}},
-			want: "except licenses on critical",
+			want: "licenses fails on critical severity",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			if err := (consoleReporter{}).Render(&buf, Data{
-				Release: saga.Release{Name: "app", Version: "1.0.0"}, Gate: c.gate,
+				Release: saga.Release{Version: "1.0.0"}, Gate: c.gate,
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -216,17 +219,56 @@ func TestALoosenedGateIsSaidWithoutAsking(t *testing.T) {
 }
 
 // TestAStricterGateNeedsNoAnnouncement. It can only fail more than a reader expects, and the
-// failure says so itself — unlike a loosening, which produces a pass that looks like any other.
-func TestAStricterGateNeedsNoAnnouncement(t *testing.T) {
+// failure says so itself. Unlike a loosening, which produces a pass that looks like any other.
+func TestAGateSomebodyChoseSaysSo(t *testing.T) {
+	// A severity gate is not a stricter version of the default, it is the other question: it
+	// judges what a scanner called the flaw rather than the band it lands in here. Which of the
+	// two catches more depends on the component, so neither can be announced as the looser and
+	// both have to be stated, because a pass means something different under each.
+	for _, tc := range []struct {
+		name string
+		gate GateSettings
+		want string
+	}{
+		{"a severity gate", GateSettings{Threshold: "low"}, "fails on low severity"},
+		{
+			"a per-control threshold",
+			GateSettings{Threshold: "high", PerControl: map[string]sarif.Severity{"secrets": "low"}},
+			"secrets fails on low severity",
+		},
+		{"a band other than the default", GateSettings{FailOnPriority: "P3"}, "fails on P3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := (consoleReporter{}).Render(&buf, Data{
+				Release: saga.Release{Version: "1.0.0"}, Gate: tc.gate,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("want %q in the default view:\n%s", tc.want, buf.String())
+			}
+		})
+	}
+}
+
+// TestTheGateLineStatesOneQuestion: a line that could say both leaves a reader with two candidates
+// for why their build is red, which is the thing the one-gate rule exists to remove.
+func TestTheGateLineStatesOneQuestion(t *testing.T) {
 	var buf bytes.Buffer
 	if err := (consoleReporter{}).Render(&buf, Data{
-		Release: saga.Release{Name: "app", Version: "1.0.0"},
-		Gate:    GateSettings{Threshold: "low", PerControl: map[string]sarif.Severity{"secrets": "low"}},
+		Release:  saga.Release{Version: "1.0.0"},
+		Gate:     GateSettings{Threshold: "high"},
+		Evidence: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(buf.String(), "Gate:") {
-		t.Errorf("a stricter gate should not interrupt the default view:\n%s", buf.String())
+	line := buf.String()
+	if !strings.Contains(line, "fails on high severity") {
+		t.Errorf("the severity gate does not say it is one:\n%s", line)
+	}
+	if strings.Contains(line, "P1") {
+		t.Errorf("a severity gate mentioned a priority band:\n%s", line)
 	}
 }
 
@@ -236,7 +278,7 @@ func TestGateOverridesAreNamedAndOrdered(t *testing.T) {
 	g := GateSettings{Threshold: "high", PerControl: map[string]sarif.Severity{
 		"licenses": "critical", "iac": "critical", "sca": "critical",
 	}}
-	want := "iac on critical, licenses on critical, sca on critical"
+	want := "iac fails on critical severity · licenses fails on critical severity · sca fails on critical severity"
 	for range 5 {
 		if got := gateOverrides(g); got != want {
 			t.Fatalf("gateOverrides = %q, want %q", got, want)

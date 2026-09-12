@@ -13,8 +13,8 @@ import (
 
 // checkReportNames rejects a report format or publisher kind this build does not have.
 //
-// `validate` answers "will this descriptor work", and it said yes to one that fails every run —
-// the format registry lives in pkg/report, which cannot be reached from pkg/saga without an import
+// `validate` answers "will this descriptor work", and it said yes to one that fails every run. The
+// format registry lives in pkg/report, which cannot be reached from pkg/saga without an import
 // cycle, so the descriptor's own validation can only check that the fields are present. The same
 // split is why a publisher kind was checked for emptiness and nothing else.
 //
@@ -34,37 +34,64 @@ func checkReportNames(model *saga.Model) error {
 	// so there is no reporter to look up.
 	formats["template"] = true
 
-	for i, r := range model.Config.Reports {
-		if r.Format == "" {
-			problems = append(problems,
-				fmt.Sprintf("config.reports[%d].format is required", i))
-			continue
-		}
-		if formats[r.Format] {
-			continue
-		}
-		msg := fmt.Sprintf("config.reports[%d].format: %q is not a format this build of Draugr renders",
-			i, r.Format)
-		if near := nearestName(r.Format, formats); near != "" {
-			msg += fmt.Sprintf(" — did you mean %q?", near)
-		}
-		problems = append(problems, msg)
-	}
-
 	kinds := map[string]bool{}
 	for _, k := range publish.Kinds() {
 		kinds[k] = true
 	}
+	seen := map[string]int{}
 	for i, p := range model.Config.Publishers {
-		if p.Kind == "" || kinds[p.Kind] {
-			continue // an empty kind is the descriptor's own check, and already reported
+		if p.Kind == "" {
+			continue // the descriptor's own check reports this
 		}
-		msg := fmt.Sprintf("config.publishers[%d].kind: %q is not a publisher this build of Draugr has",
-			i, p.Kind)
-		if near := nearestName(p.Kind, kinds); near != "" {
-			msg += fmt.Sprintf(" — did you mean %q?", near)
+		if !kinds[p.Kind] {
+			msg := fmt.Sprintf("config.publishers[%d].kind: %q is not a publisher this build of Draugr has",
+				i, p.Kind)
+			if near := nearestName(p.Kind, kinds); near != "" {
+				msg += fmt.Sprintf(", did you mean %q?", near)
+			}
+			problems = append(problems, msg)
+			continue
 		}
-		problems = append(problems, msg)
+		// One kind twice is deliberate where the entries name different destinations and a mistake
+		// where they do not, and the two are written identically. The field that tells them apart
+		// is different for every kind, which is why nothing could check it from outside.
+		field := publish.Distinguishes(p.Kind)
+		id := p.Kind + "\x00" + publish.DistinguishingValue(p)
+		if first, dup := seen[id]; dup {
+			problems = append(problems, fmt.Sprintf(
+				"config.publishers[%d] is the same destination as config.publishers[%d]: both are "+
+					"%s with the same %s, so the second delivers where the first already did. Give "+
+					"them different %s values, or keep one", i, first, p.Kind, field, field))
+		} else {
+			seen[id] = i
+		}
+
+		// A destination with no format of its own and none named delivers nothing. `file` is the
+		// only such kind: a directory has no inherent format, so what goes in it is a choice
+		// somebody has to make.
+		if len(publish.Renders(p.Kind)) == 0 && len(p.Reports) == 0 {
+			problems = append(problems, fmt.Sprintf(
+				"config.publishers[%d]: the %s publisher has no format of its own and names none, "+
+					"so it would deliver nothing. Add the formats it is for, e.g. "+
+					"`reports: [{format: sarif}]`", i, p.Kind))
+		}
+		for j, r := range p.Reports {
+			if r.Format == "" {
+				problems = append(problems, fmt.Sprintf(
+					"config.publishers[%d].reports[%d].format is required", i, j))
+				continue
+			}
+			if formats[r.Format] {
+				continue
+			}
+			msg := fmt.Sprintf(
+				"config.publishers[%d].reports[%d].format: %q is not a format this build of Draugr renders",
+				i, j, r.Format)
+			if near := nearestName(r.Format, formats); near != "" {
+				msg += fmt.Sprintf(", did you mean %q?", near)
+			}
+			problems = append(problems, msg)
+		}
 	}
 
 	if len(problems) == 0 {

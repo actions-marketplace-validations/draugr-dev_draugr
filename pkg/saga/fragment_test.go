@@ -21,7 +21,7 @@ func write(t *testing.T, dir, rel, body string) string {
 	return full
 }
 
-const rootHeader = "release: { name: acme, version: \"1.0.0\" }\n"
+const rootHeader = "project: acme\nrelease: { version: \"1.0.0\" }\n"
 
 func resolveIn(t *testing.T, dir string) (*Resolved, error) {
 	t.Helper()
@@ -111,7 +111,7 @@ components:
 	}
 }
 
-// Exclusions append, and each carries the file that authorized it — the property that makes
+// Exclusions append, and each carries the file that authorized it. The property that makes
 // splitting a governance record across files safe.
 func TestResolveAppendsExclusionsWithTheirSource(t *testing.T) {
 	dir := t.TempDir()
@@ -189,7 +189,7 @@ config:
 		t.Fatalf("ResolveFile: %v", err)
 	}
 	if n := len(res.Model.Config.Exclude); n != 1 {
-		t.Errorf("exclusions = %d, want 1 — the same file matched two patterns", n)
+		t.Errorf("exclusions = %d, want 1, the same file matched two patterns", n)
 	}
 }
 
@@ -240,7 +240,7 @@ func dirName(i int) string { return fmt.Sprintf("d%d", i) }
 // as unknown.
 func TestFragmentRejectsSectionsItMayNotCarry(t *testing.T) {
 	for _, tc := range []struct{ name, body, want string }{
-		{"release", "release: { name: x, version: \"1\" }", "has no `release:`"},
+		{"release", "release: { version: \"1\" }", "has no `release:`"},
 		{"gate", "config:\n  gate:\n    failOn: high", "may not set `config.gate`"},
 		{"controllers", "config:\n  controllers:\n    sca: { enabled: false }", "may not set `config.controllers`"},
 		{"publishers", "config:\n  publishers: [{ kind: github }]", "may not set `config.publishers`"},
@@ -331,7 +331,7 @@ func TestLoadFromBytesRefusesADescriptorWithFragments(t *testing.T) {
 	if err == nil {
 		t.Fatal("fragments were accepted from bytes")
 	}
-	if !strings.Contains(err.Error(), "load it from a path") {
+	if !strings.Contains(err.Error(), "Load it from a path") {
 		t.Errorf("error should say what to do instead: %v", err)
 	}
 }

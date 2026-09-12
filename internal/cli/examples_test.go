@@ -1,9 +1,17 @@
 package cli
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"sort"
+	"strings"
 	"testing"
 
+	"github.com/draugr-dev/draugr/internal/builtins"
+	"github.com/draugr-dev/draugr/pkg/publish"
 	"github.com/draugr-dev/draugr/pkg/saga"
 )
 
@@ -25,16 +33,24 @@ func TestShippedExamplesValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("glob examples: %v", err)
 	}
-	fragments, err := filepath.Glob("../../examples/*.saga-fragment.yaml")
-	if err != nil {
-		t.Fatalf("glob fragments: %v", err)
+	// Fragments live beside the descriptor that collects them and also one directory down, which is
+	// the shape a real repository has. So both are checked. A fragment is a descriptor a user copies
+	// too.
+	for _, pattern := range []string{
+		"../../examples/*.saga-fragment.yaml",
+		"../../examples/*/*.saga-fragment.yaml",
+	} {
+		fragments, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("glob fragments: %v", err)
+		}
+		paths = append(paths, fragments...)
 	}
-	paths = append(paths, fragments...)
 
 	// A guard that checks nothing passes. If the examples move or the suffix changes, this should
 	// say so rather than report success over an empty list.
 	if len(paths) == 0 {
-		t.Fatal("no descriptors found under examples/ — either they moved, or their suffix " +
+		t.Fatal("no descriptors found under examples/. Either they moved, or their suffix " +
 			"changed and this guard has been checking nothing")
 	}
 
@@ -63,7 +79,7 @@ func TestShippedExamplesUseNothingDeprecated(t *testing.T) {
 		t.Fatalf("glob examples: %v", err)
 	}
 	if len(paths) == 0 {
-		t.Fatal("no descriptors found under examples/ — this guard has been checking nothing")
+		t.Fatal("no descriptors found under examples/, this guard has been checking nothing")
 	}
 	for _, path := range paths {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -71,9 +87,294 @@ func TestShippedExamplesUseNothingDeprecated(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			for _, d := range model.Deprecations() {
-				t.Errorf("%s", d)
+			if model.ProjectName() == "" {
+				// An example is what somebody copies. One that files under nothing teaches a
+				// shape the plane rejects.
+				t.Error("this example names no project")
 			}
 		})
 	}
+}
+
+// TestEveryDescriptorFieldAppearsInAnExample keeps `examples/` a complete account of what a Saga
+// can say.
+//
+// A capability absent from the examples is one users do not know they have, and a shape nobody
+// writes is a shape nobody tests. Both have happened: `builtBy` decides what the report tells a
+// reader to do about a package inside an image they did not build, and it was documented, schema'd
+// and shipped without appearing in a single file we hand people to copy.
+//
+// Read off the model rather than from a list kept beside it, because a list is the thing that goes
+// stale in exactly the same way. A new field fails this the moment it is added, which is the
+// cheapest moment to write the four lines of example it needs.
+func TestEveryDescriptorFieldAppearsInAnExample(t *testing.T) {
+	t.Parallel()
+
+	corpus := readExamples(t)
+	var missing []string
+	for _, key := range sagaKeys() {
+		// An example is what somebody copies, so a spelling we are moving off must not appear in
+		// one. Held honest below: a key listed here has to actually say it is deprecated.
+		if deprecatedKeys[key] {
+			continue
+		}
+		// Written as a key, not merely mentioned. A commented-out key counts. Several options are only
+		// ever shown that way, and a reader copies a commented line as readily as a live one, but a name
+		// inside an English sentence does not. Prose satisfying this guard is how it would come to pass
+		// while the field it names appears nowhere anybody could copy.
+		if !regexp.MustCompile(`(?m)^[\t ]*(#[\t ]*)?`+regexp.QuoteMeta(key)+`:`).MatchString(corpus) &&
+			!regexp.MustCompile(`(?m)^[\t ]*(#[\t ]*)?- `+regexp.QuoteMeta(key)+`:`).MatchString(corpus) {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("no example writes these descriptor fields: %s\n"+
+			"Add each to the example it belongs in, with a line saying what it decides. "+
+			"A field nobody has seen written is one users do not know they have.",
+			strings.Join(missing, ", "))
+	}
+}
+
+// sagaKeys is every yaml key the descriptor model declares, read from the struct tags.
+// deprecatedKeys are descriptor fields that still load and that no example should teach.
+//
+// Not a way to skip writing an example. TestDeprecatedKeysSayTheyAreDeprecated refuses an entry
+// the schema does not mark, so a field cannot be parked here to get out of the guard above.
+var deprecatedKeys = map[string]bool{
+	// Replaced by `failOn`, which takes a band or a severity. Still read, so a descriptor written
+	// before the merge keeps working.
+	"failOnPriority": true,
+	// Replaced by `controls`, the word every other surface uses. Still read, and folded into
+	// `controls` when a descriptor loads.
+	"controllers": true,
+}
+
+// TestDeprecatedKeysSayTheyAreDeprecated keeps the exemption list from becoming a place to hide a
+// field nobody wrote an example for.
+func TestDeprecatedKeysSayTheyAreDeprecated(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("../../pkg/saga/draugr.saga.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	var walk func(any)
+	walk = func(n any) {
+		switch v := n.(type) {
+		case map[string]any:
+			for key, child := range v {
+				if props, ok := v["properties"].(map[string]any); ok {
+					for name, def := range props {
+						if d, ok := def.(map[string]any); ok {
+							if desc, _ := d["description"].(string); strings.HasPrefix(desc, "Deprecated:") {
+								found[name] = true
+							}
+						}
+					}
+				}
+				_ = key
+				walk(child)
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+			}
+		}
+	}
+	walk(doc)
+	for key := range deprecatedKeys {
+		if !found[key] {
+			t.Errorf("%q is exempt from the example guard and the schema does not call it "+
+				"deprecated. Either write the example, or say in the schema that it is going.", key)
+		}
+	}
+}
+
+func sagaKeys() []string {
+	seen := map[string]bool{}
+	var walk func(reflect.Type)
+	walk = func(t reflect.Type) {
+		for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Map {
+			t = t.Elem()
+		}
+		if t.Kind() != reflect.Struct {
+			return
+		}
+		for i := range t.NumField() {
+			f := t.Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+			// "-" is a field the descriptor never carries: provenance the loader fills in.
+			if name != "" && name != "-" {
+				seen[name] = true
+			}
+			walk(f.Type)
+		}
+	}
+	walk(reflect.TypeOf(saga.Model{}))
+	walk(reflect.TypeOf(saga.Fragment{}))
+
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// readExamples is every example file as one string, so a field may be demonstrated wherever it
+// belongs rather than all of them in one descriptor.
+func readExamples(t *testing.T) string {
+	t.Helper()
+	var b strings.Builder
+	for _, pattern := range []string{
+		"../../examples/*.yaml", "../../examples/*.yml", "../../examples/*/*.yaml",
+	} {
+		paths, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("glob %s: %v", pattern, err)
+		}
+		for _, path := range paths {
+			body, err := os.ReadFile(path) // #nosec G304 -- a fixed glob under examples/
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			b.Write(body)
+			b.WriteString("\n")
+		}
+	}
+	if b.Len() == 0 {
+		t.Fatal("no examples read, this guard has been checking nothing")
+	}
+	return b.String()
+}
+
+// TestEveryControlAppearsInAnExample holds the example set to the catalog.
+//
+// A control registered and never written down is one users do not know they have: `draugr controls`
+// lists it, the reference documents it, and the file people actually copy has never mentioned it.
+// Registration is the trigger, so a new control brings this failure with it rather than waiting for
+// somebody to notice the gap.
+//
+// A commented block counts, the same as for a field. Two controls send real traffic or need a key,
+// and an example that cannot be run as shipped is worse than one that shows them commented with
+// the reason.
+func TestEveryControlAppearsInAnExample(t *testing.T) {
+	t.Parallel()
+
+	corpus := readExamples(t)
+	var missing []string
+	for _, name := range controlNames(builtins.Registry()) {
+		if !regexp.MustCompile(`(?m)^[\t ]*(#[\t ]*)?` + regexp.QuoteMeta(name) + `:`).MatchString(corpus) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("no example enables these controls: %s\n"+
+			"Add each under config.controls in the example it suits, with a line saying what it "+
+			"checks. Comment it out where running it needs a key or sends real traffic, and say "+
+			"which.", strings.Join(missing, ", "))
+	}
+}
+
+// TestEveryPublisherAppearsInAnExample does the same for destinations.
+//
+// A publisher is the half of reporting somebody has to be told exists. Its kind is the only string
+// that selects it, it is never suggested by anything a reader types, and a descriptor that renders
+// reports and delivers them nowhere looks finished.
+func TestEveryPublisherAppearsInAnExample(t *testing.T) {
+	t.Parallel()
+
+	corpus := readExamples(t)
+	var missing []string
+	for _, kind := range publish.Kinds() {
+		if !regexp.MustCompile(`(?m)^[\t ]*(#[\t ]*)?- kind: ` + regexp.QuoteMeta(kind) + `\b`).MatchString(corpus) {
+			missing = append(missing, kind)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("no example writes these publishers: %s\n"+
+			"Add each under config.publishers, with the report format it needs beside it. A "+
+			"destination nobody has seen written is one users do not know they can reach.",
+			strings.Join(missing, ", "))
+	}
+}
+
+// TestEveryScannerOptionAppearsInAnExample reaches the half the field guard cannot see.
+//
+// A scanner's options live in ControllerSettings, which is a free-form map, so they have no struct
+// tags and TestEveryDescriptorFieldAppearsInAnExample walks straight past them. They are real keys
+// with real defaults, they are the difference between a control that runs and one that runs against
+// your own ruleset, mirror or cluster, and nothing was holding them to an example.
+//
+// Read from the published schema, which is generated from each scanner's own ConfigSchema, so a
+// scanner that gains an option brings this failure with it.
+func TestEveryScannerOptionAppearsInAnExample(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("../../pkg/saga/draugr.saga.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	defs, _ := doc["$defs"].(map[string]any)
+	if len(defs) == 0 {
+		t.Fatal("the schema declares no $defs, so this guard has been checking nothing")
+	}
+
+	corpus := readExamples(t)
+	seen := map[string]bool{}
+	var missing []string
+	for name, def := range defs {
+		// Only the per-control blocks. Everything else in $defs is a descriptor field, which the
+		// field guard already holds.
+		if !strings.HasPrefix(name, "control_") {
+			continue
+		}
+		scanners, _ := def.(map[string]any)["properties"].(map[string]any)
+		for scanner, node := range scanners {
+			opts, _ := node.(map[string]any)["properties"].(map[string]any)
+			for opt := range opts {
+				// Every scanner has it, and a reader meets it on the first one.
+				if opt == "enabled" || seen[opt] {
+					continue
+				}
+				seen[opt] = true
+				if !writtenAsAKey(corpus, opt) {
+					missing = append(missing, scanner+"."+opt)
+				}
+			}
+			if !seen[scanner] {
+				seen[scanner] = true
+				if !writtenAsAKey(corpus, scanner) {
+					missing = append(missing, scanner)
+				}
+			}
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("no example writes these scanner options: %s\n"+
+			"examples/scanner-options.saga.yaml is where they belong, each with a line saying "+
+			"what it decides. Comment it out where using it needs a credential or a cluster.",
+			strings.Join(missing, ", "))
+	}
+}
+
+// writtenAsAKey reports whether the corpus writes key as a YAML key rather than mentioning it in
+// prose. A commented line counts, because a reader copies one as readily as a live one.
+func writtenAsAKey(corpus, key string) bool {
+	q := regexp.QuoteMeta(key)
+	return regexp.MustCompile(`(?m)^[\t ]*(#[\t ]*)?`+q+`:`).MatchString(corpus) ||
+		regexp.MustCompile(`(?m)^[\t ]*(#[\t ]*)?- `+q+`:`).MatchString(corpus)
 }

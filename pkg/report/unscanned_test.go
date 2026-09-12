@@ -13,11 +13,11 @@ import (
 // TestComponentWithNothingScannedDoesNotPass is the false negative this exists to remove.
 //
 // A component whose whole surface is three images, none of which could be pulled, was rendering
-// as `pass  no findings`. Nothing looked at it, so there were no findings to have — and a row
+// as `pass  no findings`. Nothing looked at it, so there were no findings to have, and a row
 // saying so beside the word "pass" is the report asserting something no scanner established.
 func TestComponentWithNothingScannedDoesNotPass(t *testing.T) {
 	d := Data{
-		Release: saga.Release{Name: "app", Version: "1.0"},
+		Release: saga.Release{Version: "1.0"},
 		Verdict: norn.Result{Verdict: norn.Fail},
 		Components: []ComponentVerdict{{
 			Name:    "mesh",
@@ -51,7 +51,7 @@ func TestComponentWithNothingScannedDoesNotPass(t *testing.T) {
 // worth acting on *and* a gap, and dropping either reading is wrong.
 func TestComponentWithFindingsAndAGapReportsBoth(t *testing.T) {
 	d := Data{
-		Release: saga.Release{Name: "app", Version: "1.0"},
+		Release: saga.Release{Version: "1.0"},
 		Verdict: norn.Result{Verdict: norn.Fail},
 		Components: []ComponentVerdict{{
 			Name: "api", Verdict: norn.Fail, Findings: 4, Priorities: [4]int{2, 2, 0, 0},
@@ -106,8 +106,8 @@ func TestUnscannedDetailSaysHowMuchOfTheComponent(t *testing.T) {
 			want:     "2/2 images, 1/4 repositories not scanned",
 		},
 		{
-			// Nothing declared this kind — a project-wide target, say — so there is no
-			// denominator to give and inventing one would be worse than the bare count.
+			// Nothing declared this kind. A project-wide target, say. So there is no denominator to give
+			// and inventing one would be worse than the bare count.
 			name:     "no denominator to give",
 			us:       []engine.Unscanned{{Kind: ""}},
 			declared: nil,
