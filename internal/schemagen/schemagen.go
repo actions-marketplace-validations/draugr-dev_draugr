@@ -62,10 +62,17 @@ func controlNameDef(reg *engine.Registry) map[string]any {
 // the binary accepts. An editor that disagrees with Draugr is worse than one that says nothing.
 func allowEffectsDef() map[string]any {
 	kinds := plugin.EffectKinds()
+	// anyOf of const rather than a plain enum, so an editor shows what each kind means beside the
+	// completion. Consenting to something is the one place a reader must not be guessing at the
+	// word, and the taxonomy already explains itself.
 	enum := make([]any, 0, len(kinds))
 	var consent []string
 	for _, k := range kinds {
-		enum = append(enum, string(k))
+		desc := k.Describe()
+		if k.RequiresConsent() {
+			desc += "; will not run unless allowed"
+		}
+		enum = append(enum, map[string]any{"const": string(k), "description": desc})
 		if k.RequiresConsent() {
 			consent = append(consent, strconv.Quote(string(k)))
 		}
@@ -80,7 +87,7 @@ func allowEffectsDef() map[string]any {
 		// reached for. A scan that may do different things to different targets is a second
 		// descriptor.
 		"type":  "array",
-		"items": map[string]any{"type": "string", "enum": enum},
+		"items": map[string]any{"type": "string", "anyOf": enum},
 		// Listing a kind twice accepts nothing extra, so it is a typo rather than an intention.
 		"uniqueItems": true,
 	}
@@ -269,12 +276,12 @@ func reportFormatDef() map[string]any {
 	sort.Strings(formats)
 	vals := make([]any, len(formats))
 	for i, f := range formats {
-		vals[i] = f
+		vals[i] = map[string]any{"const": f, "description": report.Summary(f)}
 	}
 	return map[string]any{
 		"type":        "string",
 		"description": "Report format to render.",
-		"enum":        vals,
+		"anyOf":       vals,
 	}
 }
 
