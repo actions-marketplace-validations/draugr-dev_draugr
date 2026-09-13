@@ -8,7 +8,6 @@ import (
 	"io"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -392,6 +391,18 @@ func skaldFeeds(feeds []FeedProvenance) []skald.FeedProvenance {
 	return out
 }
 
+// BuildLabel is the Draugr that produced a report, spelled for somebody reading it.
+//
+// A binary not built from a release tag is stamped "dev", which in a footer reads as though "dev"
+// were the version number. Only the formats a person reads use this; the rest carry what Data
+// holds, which is what a consumer comparing two reports can compare.
+func BuildLabel(build string) string {
+	if build == "" || build == "dev" {
+		return "(development build)"
+	}
+	return "v" + strings.TrimPrefix(build, "v")
+}
+
 type sarifReporter struct{}
 
 func (sarifReporter) Format() string { return "sarif" }
@@ -455,8 +466,61 @@ func erroredControls(d Data) []string {
 }
 
 func (d Data) marshalOptions() sarif.MarshalOptions {
-	return sarif.MarshalOptions{Compact: d.View == ViewCompact}
+	return sarif.MarshalOptions{
+		Compact:      d.View == ViewCompact,
+		AutomationID: AutomationID(d.Project, d.Run.Scope),
+		ToolVersion:  d.Version,
+	}
 }
+
+// AutomationID is what a run writes to SARIF's runs[].automationDetails.id, and it decides
+// whether two analyses of one commit can coexist.
+//
+// GitHub code scanning splits the id on its last "/" into a category and a run id, and an upload
+// replaces whatever it last received under the same tool and category. A report carrying no id is
+// filed under the empty category, so a monorepo publishing two products over one commit keeps
+// only whichever pipeline finished last, with nothing in either run saying so. An upload made
+// through the code-scanning API cannot correct this from outside: that endpoint takes no category
+// of its own, and the id in the file is the only thing it reads.
+//
+// The id is the project and, when the run was narrowed, what it was narrowed to. Both are asked
+// for rather than found, which is what makes the id identical on every run of the same product,
+// and an identical id is what lets an alert fixed in one run resolve instead of reappearing under
+// a new category. The trailing "/" puts all of it in the category and leaves the run id empty.
+//
+// Empty when there is no project and no narrowing. That is a scan with no descriptor at all, and
+// also an ordinary descriptor that never set project:, which the schema does not require.
+func AutomationID(project string, scope engine.Scope) string {
+	parts := make([]string, 0, 3)
+	if project != "" {
+		parts = append(parts, automationSegment(project))
+	}
+	if len(scope.Components) > 0 {
+		parts = append(parts, "components:"+automationList(scope.Components))
+	}
+	if len(scope.Controls) > 0 {
+		parts = append(parts, "controls:"+automationList(scope.Controls))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "/") + "/"
+}
+
+// automationList renders one axis of a scope, sorted, so that --components api,web and
+// --components web,api are one category rather than two.
+func automationList(names []string) string {
+	sorted := slices.Clone(names)
+	slices.Sort(sorted)
+	for i, n := range sorted {
+		sorted[i] = automationSegment(n)
+	}
+	return strings.Join(sorted, ",")
+}
+
+// automationSegment keeps a name out of the category/run-id split, which is made on the last "/"
+// in the whole id.
+func automationSegment(s string) string { return strings.ReplaceAll(s, "/", "-") }
 
 // --- shared summary used by the human reporters ---
 
@@ -789,8 +853,13 @@ func provenanceLines(d Data) []provenanceLine {
 			// five controls reading one checkout is one fact, and repeating it five times in a
 			// block headed "measured against" is how a useful section becomes wallpaper.
 			p.Fields = withoutRepositoryFields(p.Fields)
+			// A version with nothing else to say does not earn a line here. This block answers what
+			// a control was measured against, which for a compliance control is the standard it
+			// applied, and a row per scanner carrying only a build string turns that into a
+			// version list. Which build ran is answered under Evidence, by the block that also
+			// says how strongly Draugr can vouch for it, and in the report document itself.
 			detail := p.Describe()
-			if detail == "" && p.Version == "" {
+			if detail == "" {
 				continue
 			}
 			out = append(out, provenanceLine{
@@ -947,40 +1016,6 @@ func alsoFoundBy(res sarif.Result) []sarif.Observation {
 		return nil
 	}
 	return res.Correlation.AlsoFoundBy
-}
-
-// agreementNote is the line under a finding saying which other scanners found it, and where they
-// disagree about how bad it is.
-//
-// Said rather than hidden, because two tools agreeing is itself a signal, and because a reader who
-// enabled a second scanner should be able to see it working, without this the row looks exactly
-// like a run with one scanner and the second appears to have found nothing.
-//
-// A rating is shown only when it differs from the one being counted. Where the scanners agree,
-// repeating the same numbers on every row is noise a reader has to look past; where they disagree,
-// it is the one thing this line is carrying that they could not get anywhere else. The full record
-// is in the JSON and the SARIF either way.
-func agreementNote(others []sarif.Observation, counted sarif.Severity) string {
-	if len(others) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(others))
-	for _, o := range others {
-		if o.Severity != "" && o.Severity != counted {
-			parts = append(parts, fmt.Sprintf("%s (%s)", o.Tool, ratingOf(o)))
-			continue
-		}
-		parts = append(parts, o.Tool)
-	}
-	return "also found by " + strings.Join(parts, ", ")
-}
-
-// ratingOf renders one scanner's rating, with its score where it gave one.
-func ratingOf(o sarif.Observation) string {
-	if o.Score > 0 {
-		return fmt.Sprintf("%s %s", o.Severity, strconv.FormatFloat(o.Score, 'f', -1, 64))
-	}
-	return string(o.Severity)
 }
 
 // reachabilityBlock reports what reachability analysis concluded, as a labeled block: a row per

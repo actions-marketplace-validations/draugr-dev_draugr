@@ -579,13 +579,23 @@ func validatePriority(flag, v string) (string, error) {
 	}
 }
 
-// reportVersion labels a rendered report. version.Version is "dev" for anything not built from
-// a release tag, which reads in a report footer as though "dev" were the version number.
-func reportVersion() string {
-	if version.Version == "" || version.Version == "dev" {
-		return "(development build)"
+// reportVersion is the Draugr that produced a report, as the binary was stamped.
+//
+// Raw rather than labeled: three of the formats carrying it are read by machines, and a report
+// that answers "which Draugr produced this" with "(development build)" cannot be compared with
+// another. The renderers a person reads turn it into a label themselves.
+func reportVersion() string { return strings.TrimPrefix(version.Version, "v") }
+
+// buildRef is the Draugr that produced a report, for the documents that record it.
+//
+// The commit as well as the version, because a version alone does not identify a development
+// build and those are what most runs of an unreleased change are.
+func buildRef() *skald.Build {
+	b := &skald.Build{Version: reportVersion()}
+	if version.Commit != "" && version.Commit != "none" {
+		b.Commit = version.Commit
 	}
-	return "v" + strings.TrimPrefix(version.Version, "v")
+	return b
 }
 
 // defaultArtifacts is what -o writes when --report says nothing: the two a pipeline already
@@ -655,13 +665,20 @@ func writeArtifacts(dir string, formats []string, data report.Data, release saga
 				// there is no release name left for it to be recovered from.
 				return skald.RenderJSONFor(w, data.ProjectName(), release, run, verdict,
 					firstNonEmpty(declared, minPriority), nil, sarif.MarshalOptions{},
-					skald.Provenance{Gate: data.GateForReport()})
+					skald.Provenance{Gate: data.GateForReport(), Build: buildRef()})
 			}); err != nil {
 				return err
 			}
 		case "sarif":
 			if err := writeTo(filepath.Join(dir, name), func(w io.Writer) error {
-				return skald.WriteSARIFNarrowed(w, report.FilterByPriority(run, declared), declared, sarif.MarshalOptions{})
+				// Named, because the file is what gets uploaded to code scanning, usually by an
+				// action rather than by Draugr, and an upload with no automation id in it
+				// replaces the last one filed under the empty category. See report.AutomationID.
+				return skald.WriteSARIFNarrowed(w, report.FilterByPriority(run, declared), declared,
+					sarif.MarshalOptions{
+						AutomationID: report.AutomationID(data.ProjectName(), run.Scope),
+						ToolVersion:  data.Version,
+					})
 			}); err != nil {
 				return err
 			}
@@ -786,6 +803,16 @@ func componentVerdicts(
 		}
 		for _, rep := range byComponent[name] {
 			for _, r := range rep.Results {
+				// A second scanner's copy of a flaw already counted, which the bands, the controls
+				// and the gate all skip. Counted here alone, one report gave two answers for one
+				// set, and the larger one was on the row naming the team. Reporting one
+				// vulnerability as two is the arithmetic correlation exists to prevent.
+				//
+				// Suppressed findings are already out: they are dropped where the reports are
+				// grouped above, for the same reason.
+				if r.Correlated() {
+					continue
+				}
 				cv.Findings++
 				if band := priorityBand(r.Priority); band >= 0 {
 					cv.Priorities[band]++
