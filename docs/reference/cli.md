@@ -1086,6 +1086,32 @@ install`](#draugr-tools-install-tool); doctor only reports and hints. It never d
 Provision and inspect the external scanners Draugr runs. Installs are **opt-in and
 checksum-verified**. Nothing is ever downloaded during a scan.
 
+### `draugr tools outdated`
+
+Asks each tool's upstream what it publishes now and reports it beside the version this Draugr
+installs. Nothing is downloaded and nothing on disk changes.
+
+```
+Tool         Pinned   Upstream
+gitleaks     8.30.1   8.30.1    current
+trivy        0.69.3   0.74.0    draugr tools install trivy
+semgrep      1.177.0  ?         could not ask: https://pypi.org/pypi/semgrep/json answered 503 Service Unavailable
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | `false` | Write the comparison as JSON, for a pipeline proposing a bump |
+
+**Being behind is not a fault.** A pin is the build Draugr checksum-verified and ran a scan with,
+so it moves when a bump has been tested rather than when one appears. Exits non-zero only where a
+tool could not be asked, in both output modes, because a network that refused is a different answer
+from "current" and reporting the second for the first is how a checker comes to report everything
+current while reaching nothing.
+
+**Reading the JSON**, a tool that could not be asked carries `error` and has `behind: false`, which
+is the same value a current tool has. Check `error` rather than `behind` alone, or treat the exit
+code as the answer.
+
 ### `draugr tools install [tool...]`
 
 Download **pinned** tool binaries, verify each against a **SHA-256 recorded in Draugr** (sourced
