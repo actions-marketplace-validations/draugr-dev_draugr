@@ -1,6 +1,7 @@
 package report
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -133,6 +134,75 @@ func TestUnreachableCreditNamesWhoLoweredIt(t *testing.T) {
 	}
 	if got := unreachableCredit(nil); got != "" {
 		t.Errorf("nil credit = %q", got)
+	}
+}
+
+func TestUnreachableStandingSaysTheVerdictEarnedNothing(t *testing.T) {
+	// A row with no mark and no line reads as a finding nothing was said about. The verdict is a
+	// lead the reader can follow by hand, and it is only theirs to follow if they are told it
+	// exists.
+	got := unreachableStanding(&sarif.Reachability{
+		State: sarif.ReachabilityUnreachable, Analyzer: "dep-scan",
+		Method: sarif.MethodFrameworkHeuristic, AsOf: "2026-08-21",
+	})
+	want := "unreachable · framework-heuristic · band unchanged (dep-scan, 2026-08-21)"
+	if got != want {
+		t.Errorf("standing = %q, want %q", got, want)
+	}
+	// An analyzer that will not say how it decided has not earned a band, and the line says which
+	// of the two reasons applies rather than leaving the reader to guess.
+	got = unreachableStanding(&sarif.Reachability{
+		State: sarif.ReachabilityUnreachable, Analyzer: "dep-scan",
+	})
+	if got != "unreachable · method not stated · band unchanged (dep-scan)" {
+		t.Errorf("standing = %q", got)
+	}
+	// Neither the analyzer nor the method: "not stated" would dangle with no subject, so the line
+	// names both absences rather than one.
+	got = unreachableStanding(&sarif.Reachability{State: sarif.ReachabilityUnreachable})
+	if got != "unreachable · no analyzer or method named · band unchanged" {
+		t.Errorf("standing = %q", got)
+	}
+	// The band moved, so the mark and the credit carry it and this line would say it twice.
+	if got := unreachableStanding(&sarif.Reachability{
+		State: sarif.ReachabilityUnreachable, Analyzer: "govulncheck",
+		Method: sarif.MethodCallGraph, RankedAs: sarif.SeverityMedium,
+	}); got != "" {
+		t.Errorf("standing = %q, want nothing where the band moved", got)
+	}
+	// Already at the lowest band. Nothing moved because there was nowhere to move it, and the
+	// analyzer was believed, so there is nothing for the reader to follow up.
+	if got := unreachableStanding(&sarif.Reachability{
+		State: sarif.ReachabilityUnreachable, Analyzer: "govulncheck", Method: sarif.MethodCallGraph,
+	}); got != "" {
+		t.Errorf("standing = %q, want nothing where the method was believed", got)
+	}
+	for _, r := range []*sarif.Reachability{
+		nil,
+		{State: sarif.ReachabilityReachable, Analyzer: "dep-scan", Method: sarif.MethodImportCheck},
+		{State: sarif.ReachabilityUnknown, Analyzer: "dep-scan", Method: sarif.MethodImportCheck},
+	} {
+		if got := unreachableStanding(r); got != "" {
+			t.Errorf("standing = %q for %+v", got, r)
+		}
+	}
+}
+
+func TestTheDocumentedStandingLineIsTheOneWeWrite(t *testing.T) {
+	// No analyzer in the tree reports a weak method yet, so the line in the documentation is a
+	// shape nobody can produce by running the tool. Pinning it to the function is what makes it
+	// a quote rather than an invention, and what fails the day the format moves.
+	const doc = "../../docs/concepts/prioritization.md"
+	body, err := os.ReadFile(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := unreachableStanding(&sarif.Reachability{
+		State: sarif.ReachabilityUnreachable, Analyzer: "dep-scan",
+		Method: sarif.MethodFrameworkHeuristic, AsOf: "2026-08-21",
+	})
+	if !strings.Contains(string(body), line) {
+		t.Errorf("%s does not quote %q; the documented line and the written one have parted", doc, line)
 	}
 }
 
