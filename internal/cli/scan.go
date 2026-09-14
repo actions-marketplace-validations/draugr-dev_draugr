@@ -70,6 +70,9 @@ type scanOptions struct {
 	top             int
 	noTips          bool
 	components      []string
+	labels          []string
+	exposure        []string
+	criticality     []string
 	controls        []string
 	allowScanErrors bool
 	view            string
@@ -86,7 +89,7 @@ type scanOptions struct {
 // what its answer means, to how the answer is delivered. The order the decisions are actually
 // made in.
 var scanFlagGroups = []flagGroup{
-	{"What is scanned", []string{"components", "controls", "working-tree"}},
+	{"What is scanned", []string{"components", "labels", "exposure", "criticality", "controls", "working-tree"}},
 	{"What fails the build", []string{"fail-on", "fail-on-priority", "no-gate", "allow-scan-errors"}},
 	{"Exploitability data", []string{"kev", "epss", "epss-threshold"}},
 	{"Output", []string{
@@ -174,6 +177,15 @@ func newScanCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.noTips, "no-tips", false, "suppress the console's contextual tips (also DRAUGR_NO_TIPS)")
 	cmd.Flags().StringSliceVar(&opts.components, "components", nil,
 		"scan only these components; the verdict says what it covered")
+	cmd.Flags().StringSliceVar(&opts.labels, "labels", nil,
+		"scan only components carrying these `key=value` labels; repeat for more, "+
+			"one key twice means either value")
+	cmd.Flags().StringSliceVar(&opts.exposure, "exposure", nil,
+		"scan only components declaring one of these exposures: "+
+			strings.Join(namesOf(saga.Exposures), ", "))
+	cmd.Flags().StringSliceVar(&opts.criticality, "criticality", nil,
+		"scan only components declaring one of these criticalities: "+
+			strings.Join(namesOf(saga.Criticalities), ", "))
 	cmd.Flags().StringSliceVar(&opts.controls, "controls", nil,
 		"run only these controls; the verdict says what it covered")
 	cmd.Flags().BoolVar(&opts.allowScanErrors, "allow-scan-errors", false,
@@ -218,7 +230,10 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 	// Validated before anything runs, and against this descriptor. A misspelled name matches
 	// nothing, scans nothing, and passes. The "we did not look" verdict the scope is otherwise
 	// careful not to produce, reached by typo.
-	scope := engine.Scope{Components: opts.components, Controls: opts.controls}
+	scope := engine.Scope{
+		Components: opts.components, Controls: opts.controls, Labels: opts.labels,
+		Exposure: exposures(opts.exposure), Criticality: criticalities(opts.criticality),
+	}
 	if err := scope.Validate(*model, controlNames(reg)); err != nil {
 		return err
 	}
@@ -285,6 +300,7 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		// under it. One `ls-remote` per repository, against the server a clone would use anyway,
 		// and only when caching is on.
 		engine.WithRevisionResolver(git.ResolveRevision),
+		engine.WithTreeResolver(git.ResolveTree),
 		// Name a local checkout by the repository it came from, so a scan here and a scan in a
 		// pipeline recognize each other as one source rather than two.
 		engine.WithRemoteResolver(func(path string) string {
@@ -577,6 +593,37 @@ func validatePriority(flag, v string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid %s %q (want one of P1, P2, P3, P4)", flag, v)
 	}
+}
+
+// exposures and criticalities carry the flag's words through unchanged, including a wrong one.
+//
+// Converted rather than validated here, so the error comes from Scope.Validate with the other
+// scope problems and names the values that are right. A flag that rejected its own value would
+// report one typo in a different voice from the rest.
+// namesOf renders a closed vocabulary for a flag's own help, so the values are learnable without
+// running the command and reading the error.
+func namesOf[T ~string](vals []T) []string {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		out = append(out, string(v))
+	}
+	return out
+}
+
+func exposures(vals []string) []saga.Exposure {
+	out := make([]saga.Exposure, 0, len(vals))
+	for _, v := range vals {
+		out = append(out, saga.Exposure(v))
+	}
+	return out
+}
+
+func criticalities(vals []string) []saga.Criticality {
+	out := make([]saga.Criticality, 0, len(vals))
+	for _, v := range vals {
+		out = append(out, saga.Criticality(v))
+	}
+	return out
 }
 
 // reportVersion is the Draugr that produced a report, as the binary was stamped.

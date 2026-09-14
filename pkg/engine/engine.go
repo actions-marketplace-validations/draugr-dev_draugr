@@ -41,6 +41,9 @@ type Engine struct {
 	// keyed on what was scanned rather than on a name that moves. Nil means nothing can answer,
 	// and an unpinned repository is then not cached at all.
 	resolveRevision func(ctx context.Context, url, revision string) (string, error)
+	// resolveTree identifies the content of a scoped job's own subtree, so a job reading part of a
+	// repository is keyed on the part rather than on the whole. Nil falls back to the commit.
+	resolveTree func(ctx context.Context, url, commit string, paths []string) (string, error)
 	// revisions memoizes that per run. A descriptor naming one repository from several components
 	// would otherwise ask the same question once per control.
 	revisions   map[string]string
@@ -138,6 +141,15 @@ func WithCacheableTarget(fn func(plugin.Target) bool) Option {
 // normally and not cached: a slower run is a fair price, and a wrong answer is not.
 func WithRevisionResolver(fn func(ctx context.Context, url, revision string) (string, error)) Option {
 	return func(e *Engine) { e.resolveRevision = fn }
+}
+
+// WithTreeResolver supplies the identity of a scoped job's own subtree at a commit.
+//
+// Without one, every job over a repository is keyed on that repository's commit, so a monorepo
+// commit touching one component invalidates every other component's cached result. A monorepo
+// takes a commit every few minutes, which is where the cache was going to matter most.
+func WithTreeResolver(fn func(ctx context.Context, url, commit string, paths []string) (string, error)) Option {
+	return func(e *Engine) { e.resolveTree = fn }
 }
 
 // WithWorkingTree scans repositories as they are on disk, uncommitted work included, instead of
@@ -324,6 +336,8 @@ type PlannedJob struct {
 	Component   string
 	Exposure    saga.Exposure
 	Criticality saga.Criticality
+	// Labels are what the component declares about itself, carried onto every finding it produces.
+	Labels map[string]string
 }
 
 // Plan expands the model into scan jobs. Only registered controllers that are enabled
@@ -348,7 +362,7 @@ func (e *Engine) Plan(model saga.Model) ([]PlannedJob, error) {
 			}
 			jobs, verrs := e.validateConfigs(name, jobs, permitted)
 			errs = append(errs, verrs...)
-			planned = appendJobs(planned, name, "", "", "", e.resolveRemotes(e.markWorkingTree(jobs)))
+			planned = appendJobs(planned, name, nil, e.resolveRemotes(e.markWorkingTree(jobs)))
 		case plugin.ScopeComponent:
 			if !e.scope.includesControl(name) {
 				continue
@@ -365,8 +379,7 @@ func (e *Engine) Plan(model saga.Model) ([]PlannedJob, error) {
 				}
 				jobs, verrs := e.validateConfigs(name+"/"+comp.Name, jobs, permitted)
 				errs = append(errs, verrs...)
-				planned = appendJobs(planned, name, comp.Name, comp.Exposure, comp.Criticality,
-					e.resolveRemotes(e.markWorkingTree(jobs)))
+				planned = appendJobs(planned, name, comp, e.resolveRemotes(e.markWorkingTree(jobs)))
 			}
 		}
 	}
@@ -672,6 +685,39 @@ func effectiveKey(ctx context.Context, job plugin.ScanJob, scanner plugin.Scanne
 		return string(job.CacheKey)
 	}
 	return string(plugin.ComputeCacheKey(job.Scanner, scannerVersion(ctx, scanner), job.Target, job.Config))
+}
+
+// revisionKey is what a cached result is pinned to: the content of the part this job reads, or the
+// repository's commit where that cannot be narrowed.
+//
+// A job scoped with `paths:` sees a pruned checkout, so nothing outside its own subtree can reach
+// the scanner, and a key naming the whole repository names content the job could not read. In a
+// monorepo, which is one repository carved into components, that meant a commit touching one
+// component invalidated every other component's entry. Measured on a two-component tree: a warm
+// run served twelve jobs from cache, and a one-file commit to one component took that to zero.
+//
+// Two cases keep the commit, and both are narrower rather than weaker:
+//
+//   - A job that reads the commit history. Two commits can carry an identical tree and different
+//     history, so a tree key would serve one run's answer to the other.
+//   - Anything a tree identity cannot be read for: a remote repository, an unscoped job whose
+//     subtree is the whole tree, a path absent at that commit.
+func (e *Engine) revisionKey(ctx context.Context, scanner plugin.Scanner, job plugin.ScanJob, commit string) string {
+	if commit == "" || e.resolveTree == nil {
+		return commit
+	}
+	repo, ok := job.Target.(plugin.RepositoryTarget)
+	if !ok || len(repo.Paths) == 0 {
+		return commit
+	}
+	if hr, ok := scanner.(plugin.HistoryReader); ok && hr.ReadsHistory(job.Config) {
+		return commit
+	}
+	tree, err := e.resolveTree(ctx, repo.URL, commit, repo.Paths)
+	if err != nil || tree == "" {
+		return commit
+	}
+	return tree
 }
 
 // scannerVersion identifies everything that decides what a scanner answers: a CacheVersioner's
@@ -980,8 +1026,8 @@ func (e *Engine) Run(ctx context.Context, model saga.Model) (Result, error) {
 					}
 					// Appended rather than folded into the identity, so a controller that computed
 					// its own key gets the same protection as one that did not.
-					if commit != "" {
-						key += "@" + commit
+					if at := e.revisionKey(jobCtx, scanner, pj.Job, commit); at != "" {
+						key += "@" + at
 					}
 					if rep, hit := e.cache.Get(key); hit {
 						slog.DebugContext(jobCtx, "cache hit",
@@ -1199,12 +1245,23 @@ func (e *Engine) markWorkingTree(jobs []plugin.ScanJob) []plugin.ScanJob {
 	return jobs
 }
 
-func appendJobs(dst []PlannedJob, control, component string, exposure saga.Exposure, criticality saga.Criticality, jobs []plugin.ScanJob) []PlannedJob {
+// appendJobs tags a controller's jobs with the component they belong to, so a finding can say what
+// it is about without the descriptor in hand.
+//
+// comp is nil for a project-scoped control, which belongs to no component and therefore carries no
+// classification and no labels.
+func appendJobs(dst []PlannedJob, control string, comp *saga.Component, jobs []plugin.ScanJob) []PlannedJob {
+	var p PlannedJob
+	if comp != nil {
+		p = PlannedJob{
+			Component: comp.Name, Exposure: comp.Exposure,
+			Criticality: comp.Criticality, Labels: comp.Labels,
+		}
+	}
+	p.Control = control
 	for _, j := range jobs {
-		dst = append(dst, PlannedJob{
-			Control: control, Job: j, Component: component,
-			Exposure: exposure, Criticality: criticality,
-		})
+		p.Job = j
+		dst = append(dst, p)
 	}
 	return dst
 }
@@ -1245,6 +1302,7 @@ func (e *Engine) stampJobFields(report sarif.Report, pj PlannedJob) sarif.Report
 		// its arithmetic without the descriptor in hand.
 		out.Results[i].Exposure = string(pj.Exposure)
 		out.Results[i].Criticality = string(pj.Criticality)
+		out.Results[i].Labels = pj.Labels
 		if e.prioritize != nil {
 			p := e.prioritize(pj.Control, pj.Exposure, pj.Criticality, out.Results[i])
 			out.Results[i].Priority = p.Band

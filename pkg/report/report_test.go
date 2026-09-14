@@ -1144,11 +1144,24 @@ func TestNotesOpenWithWhatArguedWithTheBand(t *testing.T) {
 		severity: sarif.SeverityHigh, message: "a flaw",
 		reachability: &sarif.Reachability{
 			State: sarif.ReachabilityUnreachable, Analyzer: "govulncheck",
+			Method:   sarif.MethodCallGraph,
 			RankedAs: sarif.SeverityMedium, AsOf: "2026-08-21",
 		},
 	})
 	if len(got) != 1 || got[0] != "↓ unreachable · a flaw · govulncheck, 2026-08-21" {
 		t.Errorf("got %q", got)
+	}
+	// A verdict that earned nothing still reaches the row. Without it the finding reads as one no
+	// analyzer has looked at, which is the opposite of what happened.
+	got = notesFor(tui.Plain(), finding{
+		severity: sarif.SeverityHigh, message: "a flaw",
+		reachability: &sarif.Reachability{
+			State: sarif.ReachabilityUnreachable, Analyzer: "dep-scan",
+			Method: sarif.MethodFrameworkHeuristic,
+		},
+	})
+	if len(got) == 0 || !strings.Contains(strings.Join(got, " "), "framework-heuristic · band unchanged") {
+		t.Errorf("got %q, want the standing verdict under the row", got)
 	}
 	// Nothing argued with it, so the line is the finding's own sentence and nothing else.
 	got = notesFor(tui.Plain(), finding{severity: sarif.SeverityHigh, message: "a flaw"})
@@ -1752,5 +1765,27 @@ func TestTheJSONReportCarriesTheSameGateTheConsolePrints(t *testing.T) {
 	}
 	if doc.Gate.PerControl["licenses"] != "critical" {
 		t.Errorf("perControl = %v", doc.Gate.PerControl)
+	}
+}
+
+// Every format this build renders says what it is for.
+//
+// The summary is read in an editor's completion popup, where it is the only thing separating
+// fifteen names from each other: four of them are GitLab schemas that differ only in which tab
+// they reach and which plan shows it.
+func TestEveryFormatSaysWhatItIsFor(t *testing.T) {
+	for _, f := range append(Formats(), "template") {
+		if Summary(f) == "" {
+			t.Errorf("format %q renders and says nothing about what it writes", f)
+		}
+	}
+	// A summary for a format nothing renders is one nobody will notice is stale.
+	for f := range formatSummaries {
+		if f == "template" {
+			continue // rendered through a different path, and offered by the schema
+		}
+		if _, ok := reporters[f]; !ok {
+			t.Errorf("formatSummaries describes %q, which this build does not render", f)
+		}
 	}
 }

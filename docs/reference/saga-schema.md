@@ -314,10 +314,13 @@ It adds no findings of its own. Its verdicts are folded onto the findings the ma
 already produced, so a Go vulnerability is still reported once, not once as `CVE-2022-32149` and
 again as `GO-2022-1059`. A vulnerability only it reports is kept.
 
-**What a verdict does.** A finding nothing can reach is ranked one band down, and the report says
-why. The severity the scanner reported is unchanged: reachability feeds the
-[priority](../concepts/prioritization.md) matrix, exactly as exploitability enrichment does in the
-other direction, and where exploitability has already raised a finding that wins.
+**What a verdict does.** A finding nothing can reach is ranked one band down when the analyzer says
+it followed calls or data to get there, and the report says why. A verdict reached any other way is
+reported and moves nothing;
+[prioritization](../concepts/prioritization.md#reachability-what-lowers-a-band) has the methods and
+what each one earns. The severity the scanner reported is unchanged either way: reachability feeds
+the [priority](../concepts/prioritization.md) matrix, exactly as exploitability enrichment does in
+the other direction, and where exploitability has already raised a finding that wins.
 
 The report says what it decided, beside everything else that moved a ranking:
 
@@ -967,14 +970,30 @@ config:
 
 | Field | Meaning |
 |-------|---------|
-| `status` | `not_affected`, `affected`, or `fixed`. |
+| `status` | The claim, from the three below. |
 | `justification` | Why the product is not affected, from VEX's fixed vocabulary. Valid only with `not_affected`. |
 
-The justifications are `component_not_present`, `vulnerable_code_not_present`,
-`vulnerable_code_not_in_execute_path`, `vulnerable_code_cannot_be_controlled_by_adversary` and
-`inline_mitigations_already_exist`. A closed list, because the entire value of the field is that
-a consumer can act on it without reading English. Omit it and the `reason` is published as VEX's
-prose alternative instead, which is valid and simply less useful to a machine.
+| `status` | The claim |
+|---|---|
+| `not_affected` | No remediation is required regarding this vulnerability. Requires a justification. |
+| `affected` | Actions are recommended to remediate or address this vulnerability. |
+| `fixed` | These product versions contain a fix for the vulnerability. |
+
+`justification` is a closed list, because the entire value of the field is that a consumer can act
+on it without reading English. These are the five, in the words the OpenVEX specification defines
+them in, except where saying only that would not tell two of them apart:
+
+| `justification` | The claim |
+|---|---|
+| `component_not_present` | The component is not included in the product at all. |
+| `vulnerable_code_not_present` | The component is included, but the vulnerable code is not, typically because of how it was configured or built. |
+| `vulnerable_code_not_in_execute_path` | The vulnerable code is present and cannot be executed as the product uses it: the product does not call it. |
+| `vulnerable_code_cannot_be_controlled_by_adversary` | The vulnerable code does run, and nothing an attacker supplies reaches it. The specification calls this difficult to prove conclusively. |
+| `inline_mitigations_already_exist` | Built-in protections completely prevent exploitation by known attack vectors, and a user cannot disable them. |
+
+The same words are on each value in the schema, so an editor shows them beside the completion.
+Omit the field and the `reason` is published as VEX's prose alternative instead, which is valid and
+simply less useful to a machine.
 
 **Omitting `vex` entirely is fine.** The suppression is then published as `affected` carrying your
 reason. True, since you did find it and did decide to accept it. Draugr will not read the reason to
@@ -1356,7 +1375,7 @@ what applies.
 ```yaml
 components:
   - name: web                 # required, unique
-    labels: { team: platform } # optional key/value metadata
+    labels: { team: platform } # optional key/value metadata; --labels selects on it
     exposure: public          # optional, risk exposure
     criticality: critical     # optional, business criticality
     builtBy: self             # optional, self (default) or upstream, for every target below
@@ -1500,6 +1519,30 @@ stay stable). They feed finding prioritization; a component may be left unclassi
 The wording names no platform on purpose: a Kubernetes network policy is one way to arrange
 `restricted`, and Draugr classifies repositories and images as well as clusters. `draugr classify`
 asks these same questions with the same words.
+
+**`labels`** is free-form `key: value` metadata about a component, optional, and it is the
+organization's vocabulary rather than Draugr's. Nothing here reads a key or attaches a meaning to
+one, and no key is privileged: a team filing by squad, by regime, by data class or by all three is
+describing its own shape, and a tool that decided what `team` meant would be describing a different
+one.
+
+```yaml
+components:
+  - name: storefront
+    labels:
+      team: web
+      data-class: pii
+```
+
+They never reach a verdict. What they do is answer *whose*, in the two places that question is
+asked. `draugr scan --labels team=web` runs only what that team owns, which is how a pipeline in a
+repository holding many teams' code stays about one of them. And every finding carries its
+component's labels into `results.sarif`, which is the document a platform expands a run from, so a
+fleet of many components can be narrowed to the ones somebody is answerable for.
+
+They are deliberately absent from the console, the Markdown report and a pull-request comment.
+Those answer what to fix, for a reader who already knows the work is theirs; filtering is a
+question asked where there is a fleet.
 
 ## `fragments`
 

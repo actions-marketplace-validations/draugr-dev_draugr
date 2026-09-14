@@ -269,6 +269,42 @@ type Reporter interface {
 	Render(w io.Writer, d Data) error
 }
 
+// formatSummaries is what each format is for, in one line.
+//
+// Beside the registry rather than in whatever renders a list of formats, because there have been
+// three such lists: the schema's completion help, the catalog's table and the publishers guide's.
+// Three wordings of one fact are three things to keep true, and the two nobody is looking at are
+// the ones that go stale.
+//
+// A sentence, capitalized, because these are read in an editor's completion popup beside the
+// value they describe.
+// #nosec G101 -- format names and what each one writes. One of them is the GitLab secret-detection
+// report, so the word appears in a description; no value here is or resembles a credential.
+var formatSummaries = map[string]string{
+	"console":  "The terminal report, for a run somebody is watching.",
+	"evidence": "The console report plus what makes it defensible: tools, revisions, and what each control measured against.",
+	"html":     "A self-contained page, for attaching to a ticket or an audit.",
+	"json":     "The whole run as one document, for a platform or a script.",
+	"junit":    "One failed test per finding, for a CI test panel.",
+	"markdown": "The report as prose and tables, for a merge request comment or a wiki.",
+	"sarif":    "SARIF 2.1.0, which code scanning and editors read.",
+	"template": "Your own layout, from --template or --template-file.",
+	"vex":      "An OpenVEX document saying which vulnerabilities apply to this product.",
+
+	"gitlab-codequality":         "GitLab Code Quality: every finding, in the merge request, on any tier.",
+	"gitlab-sast":                "GitLab's own security schema, for its Vulnerability Report. A build artifact rather than an upload.",
+	"gitlab-dependency-scanning": "The same, for vulnerable dependencies.",
+	"gitlab-secret-detection":    "The same, for leaked credentials.",
+	"gitlab-container-scanning":  "The same, for vulnerable packages in a container image.",
+	"gitlab-cyclonedx":           "The SBOM as GitLab reads it, filling the Dependency List and License Compliance.",
+}
+
+// Summary is what a format is for, or "" for a name this build does not render.
+//
+// The one place that answers it. An editor's completion, the catalog's table and any listing
+// written later read this rather than composing a sentence of their own.
+func Summary(format string) string { return formatSummaries[format] }
+
 // reporters is the built-in format registry.
 var reporters = map[string]Reporter{
 	"console":  consoleReporter{},
@@ -1096,11 +1132,45 @@ func reachabilityPath(r *sarif.Reachability) string {
 // The mark on the row says the band was lowered; this is the part a reader would otherwise have to
 // take on trust. A call graph does not see reflection or code generated tomorrow, so which
 // analyzer ran and which day it ran are what make the claim one somebody can argue with.
+//
+// Not the method. Every method that lowers a band is one Draugr treats as evidence of absence, so
+// naming it here separates two analyzers a reader would act on identically, at the cost of the
+// line the finding's own sentence shares. Where the method decided something the reader cannot
+// otherwise see, it is named: see unreachableStanding.
 func unreachableCredit(r *sarif.Reachability) string {
 	if r == nil || r.State != sarif.ReachabilityUnreachable || r.RankedAs == "" {
 		return ""
 	}
 	return strings.TrimSuffix(strings.TrimPrefix(attribution(r), " ("), ")")
+}
+
+// unreachableStanding reports an unreachable verdict that left the band where it was.
+//
+// The row carries no mark in that case, so without this line the finding reads as one nothing was
+// ever said about. Two things put a verdict here, and the reader's next move differs by which: a
+// method whose negative Draugr does not treat as evidence of absence, where the verdict is a lead
+// worth following by hand; and an analyzer that did not say how it decided, where it is not.
+//
+// A finding already at the lowest band is neither. Nothing moved because there was nowhere to move
+// it, and the analyzer was believed.
+func unreachableStanding(r *sarif.Reachability) string {
+	if r == nil || r.State != sarif.ReachabilityUnreachable || r.RankedAs != "" {
+		return ""
+	}
+	if sarif.ProvesAbsence(r.Method) {
+		return ""
+	}
+	credit := attribution(r)
+	switch {
+	case r.Method != "":
+		return "unreachable · " + r.Method + " · band unchanged" + credit
+	case credit != "":
+		return "unreachable · method not stated · band unchanged" + credit
+	default:
+		// Nothing said who decided or how. "method not stated" on its own has no subject, and a
+		// line whose subject a reader has to guess at is worse than one that names both absences.
+		return "unreachable · no analyzer or method named · band unchanged"
+	}
 }
 
 // attribution names the analyzer and the day it ran. A reachability verdict describes one
