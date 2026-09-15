@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,7 +31,110 @@ func newToolsCommand() *cobra.Command {
 	}
 	cmd.AddCommand(newToolsInstallCommand())
 	cmd.AddCommand(newToolsListCommand())
+	cmd.AddCommand(newToolsOutdatedCommand())
 	return cmd
+}
+
+func newToolsOutdatedCommand() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "outdated",
+		Short: "Compare each pinned tool against the version its upstream publishes",
+		Long: "Asks each tool's upstream what it publishes now and reports it beside the version " +
+			"this Draugr installs.\n\n" +
+			"The only command here that reaches the network without being asked to install " +
+			"something. Nothing is downloaded and nothing on disk changes.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if netpolicy.Offline() {
+				return netpolicy.Refuse("draugr tools outdated",
+					"the release listings each tool publishes")
+			}
+			return runToolsOutdated(cmd.Context(), cmd.OutOrStdout(), asJSON)
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		"write the comparison as JSON, for a pipeline proposing a bump")
+	return cmd
+}
+
+// runToolsOutdated reports what each upstream publishes beside what Draugr pins.
+//
+// Exits non-zero only where something could not be asked. Being behind is a fact to act on rather
+// than a failure: a pipeline reads the JSON and decides, and a person reading the table has not
+// done anything wrong by being one release back.
+func runToolsOutdated(ctx context.Context, w io.Writer, asJSON bool) error {
+	drift := tools.Outdated(ctx, nil)
+
+	if asJSON {
+		type row struct {
+			Tool   string `json:"tool"`
+			Pinned string `json:"pinned"`
+			Latest string `json:"latest,omitempty"`
+			Behind bool   `json:"behind"`
+			Error  string `json:"error,omitempty"`
+		}
+		out := make([]row, 0, len(drift))
+		var unreachable int
+		for _, d := range drift {
+			r := row{Tool: d.Tool, Pinned: d.Pinned, Latest: d.Latest, Behind: d.Behind()}
+			if d.Err != nil {
+				r.Error = d.Err.Error()
+				unreachable++
+			}
+			out = append(out, r)
+		}
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(out); err != nil {
+			return err
+		}
+		// The document is written first and the failure reported after, so a pipeline gets both
+		// the rows and the exit code. Without the second, the one consumer this format exists for
+		// reads "could not reach npm" as "current", which is the confusion `Drift.Err` is shaped
+		// to prevent and the table mode already avoids.
+		if unreachable > 0 {
+			return fmt.Errorf("%d tool(s) could not be compared", unreachable)
+		}
+		return nil
+	}
+
+	col := tui.For(w)
+	table := tui.NewTable(col, "Tool", "Pinned", "Upstream", "")
+	var behind, unknown int
+	for _, d := range drift {
+		switch {
+		case d.Err != nil:
+			unknown++
+			table.Row(tui.Styled(tui.StyleStrong, d.Tool), tui.PlainCell(d.Pinned),
+				tui.Styled(tui.StyleMuted, "?"),
+				tui.Styled(tui.StyleMuted, "could not ask: "+d.Err.Error()))
+		case d.Behind():
+			behind++
+			table.Row(tui.Styled(tui.StyleStrong, d.Tool), tui.PlainCell(d.Pinned),
+				tui.Styled(tui.StyleAccent, d.Latest),
+				tui.Styled(tui.StyleMuted, "draugr tools install "+d.Tool))
+		default:
+			table.Row(tui.Styled(tui.StyleStrong, d.Tool), tui.PlainCell(d.Pinned),
+				tui.Styled(tui.StyleMuted, d.Latest), tui.Styled(tui.StyleMuted, "current"))
+		}
+	}
+	table.Render(w)
+
+	// A pin is not a version somebody forgot to update. It is the build Draugr verified, so the
+	// line says what being behind means rather than implying the reader is late.
+	// Counted over what answered, not over everything. "0 of 11 behind" beside two rows that
+	// could not be reached reads as a clean bill of health for tools nobody asked about.
+	line := fmt.Sprintf("%d of %d behind the version their upstream publishes.",
+		behind, len(drift)-unknown)
+	if unknown > 0 {
+		line += fmt.Sprintf(" %s could not be asked.", plural(unknown, "tool"))
+	}
+	_, _ = fmt.Fprintf(w, "\n%s\n", col.Paint(tui.StyleMuted, line))
+	if unknown > 0 {
+		return fmt.Errorf("%d tool(s) could not be compared", unknown)
+	}
+	return nil
 }
 
 type toolsInstallOptions struct {
@@ -323,9 +428,22 @@ func runToolsInstall(w io.Writer, in io.Reader, names []string, opts toolsInstal
 
 	col := tui.For(w)
 	var failed, unchanged int
+	var skipped []string
 	for _, name := range names {
 		res, err := install(name)
 		if err != nil {
+			// With no arguments the request was "everything this host can have", so a tool whose
+			// runtime is not here is not something this command was asked for and failed to do.
+			// Refusing the batch over it fails nine installs to report a tenth, and the tenth is
+			// usually a scanner the descriptor never names.
+			//
+			// Named, it stays a failure. Asking for a tool and being told it worked is the
+			// guarantee worth keeping, and it is the one `--saga` and every pipeline rely on.
+			if all && errors.Is(err, tools.ErrRuntimeMissing) {
+				_, _ = fmt.Fprintf(w, "%s %s: %v\n", col.Paint(tui.StyleMuted, "–"), name, err)
+				skipped = append(skipped, name)
+				continue
+			}
 			_, _ = fmt.Fprintf(w, "%s %s: %v\n", col.Paint(tui.StyleFail, "✗"), name, err)
 			failed++
 			continue
@@ -349,10 +467,27 @@ func runToolsInstall(w io.Writer, in io.Reader, names []string, opts toolsInstal
 		_, _ = fmt.Fprintln(w, col.Paint(tui.StyleMuted, fmt.Sprintf("%s unchanged.", plural(unchanged, "tool"))))
 	}
 
+	// Named, so the command that installs them is one somebody can copy. A count alone leaves a
+	// reader to work out which of ten rows was the skipped one.
+	if len(skipped) > 0 {
+		_, _ = fmt.Fprintln(w, col.Paint(tui.StyleMuted, fmt.Sprintf(
+			"%s skipped, this host has no runtime to build %s with. Install one and run "+
+				"`draugr tools install %s`.",
+			plural(len(skipped), "tool"), pronounFor(len(skipped)), strings.Join(skipped, " "))))
+	}
+
 	if failed > 0 {
 		return fmt.Errorf("%d tool(s) failed to install", failed)
 	}
 	return nil
+}
+
+// pronounFor keeps the skipped line reading as a sentence at either count.
+func pronounFor(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
 }
 
 // downloads counts what Draugr will actually fetch.
@@ -422,7 +557,7 @@ func writeInstallPlan(w io.Writer, names []string, _ bool, have map[string]strin
 		}
 		return "-"
 	}
-	_, _ = fmt.Fprintln(w, "Install plan:")
+	_, _ = fmt.Fprintln(w, tui.For(w).Paint(tui.StyleMuted, "PLAN"))
 	col := tui.For(w)
 	table := tui.NewTable(col, "Tool", "Version", "Category", "Verify", "Destination").Indent("  ")
 
@@ -437,7 +572,7 @@ func writeInstallPlan(w io.Writer, names []string, _ bool, have map[string]strin
 		if pySpec, isPython := tools.PythonTool(name); isPython {
 			if satisfied(name) {
 				table.Row(tui.Styled(tui.StyleMuted, name), tui.PlainCell(tools.PythonVersion(name)),
-					tui.PlainCell(category(name)), tui.PlainCell("—"),
+					tui.PlainCell(category(name)), tui.PlainCell("-"),
 					tui.Styled(tui.StyleMuted, "already at "+have[name]))
 				continue
 			}
@@ -453,7 +588,7 @@ func writeInstallPlan(w io.Writer, names []string, _ bool, have map[string]strin
 		if nodeSpec, isNode := tools.NodeTool(name); isNode {
 			if satisfied(name) {
 				table.Row(tui.Styled(tui.StyleMuted, name), tui.PlainCell(tools.NodeVersion(name)),
-					tui.PlainCell(category(name)), tui.PlainCell("—"),
+					tui.PlainCell(category(name)), tui.PlainCell("-"),
 					tui.Styled(tui.StyleMuted, "already at "+have[name]))
 				continue
 			}
@@ -469,7 +604,7 @@ func writeInstallPlan(w io.Writer, names []string, _ bool, have map[string]strin
 		if _, isGo := tools.GoTool(name); isGo {
 			if satisfied(name) {
 				table.Row(tui.Styled(tui.StyleMuted, name), tui.PlainCell(tools.GoVersion(name)),
-					tui.PlainCell(category(name)), tui.PlainCell("—"),
+					tui.PlainCell(category(name)), tui.PlainCell("-"),
 					tui.Styled(tui.StyleMuted, "already at "+have[name]))
 				continue
 			}
@@ -489,7 +624,7 @@ func writeInstallPlan(w io.Writer, names []string, _ bool, have map[string]strin
 		}
 		if satisfied(name) {
 			table.Row(tui.Styled(tui.StyleMuted, name), tui.PlainCell(spec.Version),
-				tui.PlainCell(category(name)), tui.PlainCell("—"),
+				tui.PlainCell(category(name)), tui.PlainCell("-"),
 				tui.Styled(tui.StyleMuted, "already at "+have[name]))
 			continue
 		}
@@ -532,24 +667,38 @@ func runToolsList(ctx context.Context, w io.Writer) error {
 			sort.Strings(cs)
 			controls = strings.Join(cs, ",")
 		}
+		// The runtime is named where there is one, because `draugr tools install` on its own is
+		// advice that does not work on a host without it, and nothing else in this table says a
+		// prerequisite exists. Three of these tools publish no release binary at all and are built
+		// here from source, which is not a fact a reader can infer from anything else on the row.
 		pinned, source := "-", "system PATH"
 		if spec, ok := tools.Spec(t.Binary); ok {
 			pinned, source = spec.Version, "draugr tools install"
 		} else if _, ok := tools.PythonTool(t.Binary); ok {
-			pinned, source = tools.PythonVersion(t.Binary), "draugr tools install"
+			pinned, source = tools.PythonVersion(t.Binary), "draugr tools install · needs Python"
 		} else if _, ok := tools.NodeTool(t.Binary); ok {
-			pinned, source = tools.NodeVersion(t.Binary), "draugr tools install"
+			pinned, source = tools.NodeVersion(t.Binary), "draugr tools install · needs Node"
 		} else if _, ok := tools.GoTool(t.Binary); ok {
-			pinned, source = tools.GoVersion(t.Binary), "draugr tools install"
+			pinned, source = tools.GoVersion(t.Binary), "draugr tools install · needs Go"
 		}
 
 		status, statusStyle := "✗ not found", tui.StyleFail
-		if st := tools.Detect(ctx, t, nil, nil); st.Found {
+		// Through detectTool, like the install plan above it. Called directly, this row read the
+		// machine the test happened to run on, so the one command whose whole output is a table of
+		// what is on this machine was the one nothing could pin.
+		if st := detectTool(ctx, t); st.Found {
 			version := st.Version
 			if version == "" {
 				version = "?"
 			}
 			status, statusStyle = fmt.Sprintf("✓ %s (%s)", version, st.Path), tui.StylePass
+			// Present is not the same answer as present at the version this build pins, and a
+			// tick said both. `tools install` already knew the difference and would have replaced
+			// it, so the two commands disagreed about one machine.
+			if pinned != "-" && version != "?" && version != pinned {
+				status = fmt.Sprintf("~ %s (%s)", version, st.Path)
+				statusStyle = tui.StyleAccent
+			}
 		}
 		table.Row(
 			tui.Styled(tui.StyleAccent, t.Binary),

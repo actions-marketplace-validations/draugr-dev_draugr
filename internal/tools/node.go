@@ -48,7 +48,7 @@ var nodeVersions = map[string]string{"retire": retireVersion}
 
 // retireVersion is the pinned retire.js version. Keep it in step with nodepins/retire.*.json,
 // which is generated for exactly this version.
-const retireVersion = "5.4.3"
+const retireVersion = "5.7.0"
 
 // NodeTool reports the spec for a tool obtained as an npm package.
 func NodeTool(name string) (NodeSpec, bool) {
@@ -178,9 +178,9 @@ func runIn(ctx context.Context, dir, name string, args ...string) error {
 func findNode(ctx context.Context) (string, error) {
 	npm, err := execLookPath("npm")
 	if err != nil {
-		return "", fmt.Errorf("retire.js is an npm package and no `npm` is on PATH. Install "+
-			"Node %d or newer, or install retire.js yourself with `npm install -g retire`",
-			minNodeMajor)
+		return "", RuntimeMissing(fmt.Errorf(
+			"retire.js is an npm package and no `npm` is on PATH. Install Node %d or newer, or "+
+				"install retire.js yourself with `npm install -g retire`", minNodeMajor))
 	}
 	if ok, found := nodeAtLeast(ctx, minNodeMajor); !ok {
 		return "", fmt.Errorf("node %s is older than %d, which `npm ci` needs to install from a "+

@@ -40,7 +40,7 @@ var goInstallable = map[string]GoSpec{
 var goVersions = map[string]string{"govulncheck": govulncheckVersion}
 
 // govulncheckVersion is the pinned govulncheck release.
-const govulncheckVersion = "1.7.0"
+const govulncheckVersion = "1.8.0"
 
 // GoTool reports the spec for a tool built with the Go toolchain.
 func GoTool(name string) (GoSpec, bool) {
@@ -127,14 +127,16 @@ func runEnv(ctx context.Context, env []string, name string, args ...string) erro
 func findGo(ctx context.Context, tool string) (string, error) {
 	goBin, err := execLookPath("go")
 	if err != nil {
-		return "", fmt.Errorf("%s is distributed as a Go package and no `go` is on PATH, "+
-			"install Go %d or newer from https://go.dev/dl/, or install it yourself with "+
-			"`go install %s@v%s`", tool, minGoMinor, goInstallable[tool].Command, goVersions[tool])
+		return "", RuntimeMissing(fmt.Errorf(
+			"%s is distributed as a Go package and no `go` is on PATH, install Go 1.%d or newer "+
+				"from https://go.dev/dl/, or install it yourself with `go install %s@v%s`",
+			tool, minGoMinor, goInstallable[tool].Command, goVersions[tool]))
 	}
 	if ok, found := goAtLeast(ctx, goBin, minGoMinor); !ok {
-		return "", fmt.Errorf("go %s is older than 1.%d, which is needed to fetch the toolchain "+
-			"%s asks for. Upgrade Go, or install it yourself with `go install %s@v%s`",
-			found, minGoMinor, tool, goInstallable[tool].Command, goVersions[tool])
+		return "", RuntimeMissing(fmt.Errorf(
+			"go %s is older than 1.%d, which is needed to fetch the toolchain %s asks for. "+
+				"Upgrade Go, or install it yourself with `go install %s@v%s`",
+			found, minGoMinor, tool, goInstallable[tool].Command, goVersions[tool]))
 	}
 	return goBin, nil
 }

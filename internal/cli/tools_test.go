@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -67,7 +68,7 @@ func TestRunToolsInstallPlanAndDryRun(t *testing.T) {
 		t.Error("--dry-run must not install anything")
 	}
 	s := out.String()
-	for _, want := range []string{"Install plan", "trivy", "cosign", "scanner", "utility", "dry run"} {
+	for _, want := range []string{"PLAN", "trivy", "cosign", "scanner", "utility", "dry run"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("plan output missing %q\n%s", want, s)
 		}
@@ -387,13 +388,16 @@ func stubDetect(t *testing.T, found map[string]string) {
 func TestInstallPlanMarksWhatIsAlreadyThere(t *testing.T) {
 	// The plan is the moment someone decides whether to let a security tool write to their machine,
 	// and it was describing work it would not do, six rows for one download.
-	stubDetect(t, map[string]string{"trivy": "0.69.3"})
+	// The pinned version, read from the manifest rather than written here, so a version bump does
+	// not leave this asserting a string the product stopped producing.
+	pinned, _ := tools.Spec("trivy")
+	stubDetect(t, map[string]string{"trivy": pinned.Version})
 	var out bytes.Buffer
 	names := []string{"trivy", "gitleaks"}
 	writeInstallPlan(&out, names, false, present(context.Background(), names, toolsInstallOptions{}), toolsInstallOptions{})
 
 	got := out.String()
-	if !strings.Contains(got, "already at 0.69.3") {
+	if !strings.Contains(got, "already at "+pinned.Version) {
 		t.Errorf("a satisfied tool should say so:\n%s", got)
 	}
 	if !strings.Contains(got, "1 tool to install, 1 already current") {
@@ -756,5 +760,106 @@ func TestARealDownloadStillAsks(t *testing.T) {
 	}
 	if called != 0 {
 		t.Errorf("declined, but installed %d tool(s)", called)
+	}
+}
+
+// `draugr tools install` with no arguments means "everything this host can have". A tool whose
+// runtime is not on the machine is not something the command was asked for and failed to do, and
+// refusing the batch over it fails nine installs to report a tenth, usually a scanner the
+// descriptor never names.
+func TestRunToolsInstallAllSkipsAToolWhoseRuntimeIsAbsent(t *testing.T) {
+	stubDetect(t, map[string]string{})
+	var out bytes.Buffer
+	var installed []string
+	install := func(name string) (tools.Installed, error) {
+		if name == "govulncheck" {
+			return tools.Installed{}, fmt.Errorf("no `go` is on PATH: %w", tools.ErrRuntimeMissing)
+		}
+		installed = append(installed, name)
+		return tools.Installed{Name: name, Version: "1.0.0", Path: "/x/" + name}, nil
+	}
+	if err := runToolsInstall(&out, nil, nil, toolsInstallOptions{yes: true}, install); err != nil {
+		t.Fatalf("one absent runtime failed the whole batch: %v\n%s", err, out.String())
+	}
+	if slices.Contains(installed, "govulncheck") {
+		t.Error("govulncheck reported as installed when its runtime is absent")
+	}
+	if len(installed) == 0 {
+		t.Fatal("nothing else was installed")
+	}
+	// Named and with the command to run, so a reader does not have to work out which of ten rows
+	// it was.
+	for _, want := range []string{"govulncheck", "draugr tools install govulncheck"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the skipped line never said %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// Asking for a tool by name and being told it worked is the guarantee worth keeping, and the one
+// every pipeline relies on. A missing runtime is still a failure there.
+func TestRunToolsInstallNamedStillFailsOnAnAbsentRuntime(t *testing.T) {
+	stubDetect(t, map[string]string{})
+	var out bytes.Buffer
+	install := func(string) (tools.Installed, error) {
+		return tools.Installed{}, fmt.Errorf("no `go` is on PATH: %w", tools.ErrRuntimeMissing)
+	}
+	err := runToolsInstall(&out, nil, []string{"govulncheck"}, toolsInstallOptions{yes: true}, install)
+	if err == nil {
+		t.Fatal("a named install with no runtime reported success")
+	}
+	if !strings.Contains(out.String(), "✗ govulncheck") {
+		t.Errorf("the named failure should be flagged as one:\n%s", out.String())
+	}
+}
+
+// Everything that is not a missing runtime still fails the batch. A download that 404s, a checksum
+// that does not match and a disk that is full are all the command failing at what it was asked.
+func TestRunToolsInstallAllStillFailsOnAnOrdinaryError(t *testing.T) {
+	stubDetect(t, map[string]string{})
+	var out bytes.Buffer
+	install := func(name string) (tools.Installed, error) {
+		if name == "trivy" {
+			return tools.Installed{}, errors.New("checksum mismatch")
+		}
+		return tools.Installed{Name: name, Version: "1.0.0", Path: "/x/" + name}, nil
+	}
+	if err := runToolsInstall(&out, nil, nil, toolsInstallOptions{yes: true}, install); err == nil {
+		t.Fatal("a checksum mismatch in the batch reported success")
+	}
+}
+
+// The JSON is what a pipeline gates on, and it reported success while every upstream was
+// unreachable. "Could not reach npm" read as "current", which is the one confusion this format
+// exists to prevent and the table mode already avoided.
+func TestToolsOutdatedJSONFailsWhenAnUpstreamCouldNotBeAsked(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	var out bytes.Buffer
+	err := runToolsOutdated(context.Background(), &out, true)
+	if err == nil {
+		t.Fatal("every upstream unreachable and the exit code said success")
+	}
+	// The rows are written even so, because a pipeline wants both the reasons and the failure.
+	var rows []struct {
+		Tool   string `json:"tool"`
+		Behind bool   `json:"behind"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("the document was not written: %v\n%s", err, out.String())
+	}
+	if len(rows) == 0 {
+		t.Fatal("no rows")
+	}
+	for _, r := range rows {
+		if r.Error == "" {
+			t.Errorf("%s reports no error though nothing could be reached", r.Tool)
+		}
+		// The trap this documents: unreachable and current are both `behind: false`, so a
+		// consumer reading that field alone cannot tell them apart.
+		if r.Behind {
+			t.Errorf("%s is marked behind on an answer nobody got", r.Tool)
+		}
 	}
 }
