@@ -680,14 +680,14 @@ draugr explain kube-bench/cis/4.3.1 -r out/results.sarif
 kube-bench/cis/4.3.1
 Ensure that the kube-proxy metrics service is bound to localhost (Automated)
 
-How to fix
+DETAIL
   Modify or remove any values which bind the metrics service to a non-localhost address.
   The default value is 127.0.0.1:10249.
 
-Found in
+LOCATION
   kubernetes/prod-cluster
 
-Reference
+REFERENCE
   https://www.cisecurity.org/benchmark/kubernetes
 ```
 
@@ -1045,6 +1045,31 @@ A tool is also reported as unusable when it is installed but its supporting data
 `kube-bench` without its `cfg/` benchmarks, `nuclei` without its templates. Being on PATH is not the
 same as being able to run.
 
+### A tool that is not the version Draugr tested
+
+Draugr pins a version of each tool it can install, and its own suite runs against that build. A
+tool on `PATH` from a distribution package, or installed with `--version`, is very likely fine and
+is not the one anything exercised. The row says which version was tested and one line counts them:
+
+```console
+$ draugr doctor
+trivy  ✓ found  0.69.3  /home/you/.draugr/bin/trivy · tested against 0.74.0
+
+1 tool is not the version Draugr tests. Older scanners find fewer things; `draugr tools install --force` installs the tested build.
+```
+
+**A note rather than a failure.** Refusing to run would be Draugr mistaking *I have not tested
+this* for *this is wrong*. It is said out loud because an older scanner finds **fewer** things, and
+a scan that quietly finds fewer things is the failure a security tool must not have.
+
+| | |
+|---|---|
+| `--strict` | fails the command as well, for a pipeline that would rather stop than scan with a build nothing has exercised |
+| `--json` | carries `testedVersion` on a tool that is not running its pin, and omits it on one that is |
+
+The count and the remedy, rather than a mark on every row: a machine that has not reinstalled in a
+while has most of them, and a mark on every row is not a mark.
+
 ### What nothing is looking at
 
 Every tool being present is only half of "will this scan tell me what I think it will". The other
@@ -1071,6 +1096,7 @@ only narrows it.
 |------|---------|-------------|
 | `--json` | `false` | Emit the report as JSON instead of a table (uncovered surfaces come too, as `uncoveredSurfaces`) |
 | `--fail-on-uncovered` | `false` | Exit non-zero when the descriptor declares a surface no enabled control looks at |
+| `--strict` | `false` | Exit non-zero when a tool is not the version Draugr tests, as well as when one is missing |
 | `--offline` | `false` | Skip the check for a newer draugr release (also `DRAUGR_NO_UPDATE_CHECK=1`) |
 
 ```bash
@@ -1124,8 +1150,11 @@ code as the answer.
 
 Download **pinned** tool binaries, verify each against a **SHA-256 recorded in Draugr** (sourced
 from the upstream checksums files), and install them into `~/.draugr/bin`, which Draugr **adds to
-`PATH` automatically**, so `scan`/`doctor` use them with no shell config. With no arguments,
-installs everything this host can have.
+`PATH` automatically**, so `scan`/`doctor` use them with no shell config.
+
+**Name a descriptor and the download is a fraction of the size.** `--saga` installs the tools that
+descriptor's scan will run and nothing else; the whole catalog is several hundred megabytes and
+most projects reach part of it. `--all`, or no arguments, installs everything this host can have.
 
 **Three of them are built from source, not downloaded.** `govulncheck` needs a Go toolchain,
 `retire` needs Node, and `semgrep` needs Python, because none publishes a release binary. With no
@@ -1150,15 +1179,19 @@ on. `draugr tools list` names the runtime each of the three needs.
 | `--force` | `false` | Reinstall even when the pinned build is already present |
 | `--version` |, | Install this version instead of the one Draugr ships (one tool at a time) |
 | `--saga` |, | Install only the tools that descriptor's scan will run |
+| `--all` | `false` | Install every tool Draugr can provision, which is what no arguments does |
 
 ```bash
-draugr tools install            # plan → confirm → install everything, into ~/.draugr/bin
+draugr tools install --saga draugr.saga.yaml   # only what this project's scan runs
 draugr tools install trivy      # just one
+draugr tools install --all      # plan → confirm → the whole catalog, into ~/.draugr/bin
 draugr tools install --dry-run  # preview the plan, change nothing
 draugr tools install -y         # non-interactive
-draugr tools install --saga draugr.saga.yaml   # only what this project's scan runs
 draugr tools install trivy --version 0.68.0    # a version other than the one Draugr ships
 ```
+
+`--all`, `--saga` and a tool list each answer the same question differently, so passing two is an
+error rather than a precedence rule to remember.
 
 **Pinning a version.** A team wanting every pipeline to scan with the same Trivy writes it once,
 where it gets reviewed:
