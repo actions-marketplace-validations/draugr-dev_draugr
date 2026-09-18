@@ -17,6 +17,57 @@ import (
 	"github.com/draugr-dev/draugr/pkg/sarif"
 )
 
+const doctorSagaProvenanceSigstore = `project: app
+release:
+  version: "1.0"
+config:
+  controls:
+    provenance:
+      enabled: true
+      signers:
+        - name: our-ci
+          images: ["ghcr.io/acme/*"]
+          keyless:
+            issuer: https://token.actions.githubusercontent.com
+            identity: https://github.com/acme/ci/.github/workflows/r.yml@refs/heads/main
+components:
+  - name: web
+    images:
+      - image: ghcr.io/acme/web:1
+`
+
+const doctorSagaProvenanceX509 = `project: app
+release:
+  version: "1.0"
+config:
+  controls:
+    provenance:
+      enabled: true
+      signers:
+        - name: acme-pki
+          images: ["acme.azurecr.io/*"]
+          x509:
+            trustStore: roots.pem
+            subject: "C=US, O=Acme, CN=Acme Release Signing"
+components:
+  - name: web
+    images:
+      - image: acme.azurecr.io/web:1
+`
+
+const doctorSagaProvenance = `project: app
+release:
+  version: "1.0"
+config:
+  controls:
+    provenance:
+      enabled: true
+components:
+  - name: web
+    images:
+      - image: ghcr.io/acme/web:1
+`
+
 const doctorSagaRepoAndImage = `project: app
 release:
   version: "1.0"
@@ -148,8 +199,11 @@ func TestRunDoctorMissingFails(t *testing.T) {
 		t.Fatal("expected error when a required tool is missing")
 	}
 	s := out.String()
-	if !strings.Contains(s, "✗ missing") || !strings.Contains(s, "trivy.dev") {
-		t.Errorf("output should flag the missing tool with a hint\n%s", s)
+	// The row names the command rather than trivy.dev: Draugr distributes trivy, and the pinned
+	// archive with its checksum checked is a better answer than whatever the download page is
+	// serving today.
+	if !strings.Contains(s, "✗ missing") || !strings.Contains(s, "install: draugr tools install trivy") {
+		t.Errorf("output should flag the missing tool and name how to get it\n%s", s)
 	}
 	if !strings.Contains(s, "tools install") {
 		t.Errorf("output should nudge provisioning\n%s", s)
@@ -239,6 +293,57 @@ func TestRequiredToolsDerivation(t *testing.T) {
 	}
 	if got := binaries(requiredTools(reg, model)); !slices.Equal(got, []string{"trivy"}) {
 		t.Errorf("images-only required = %v, want [trivy]", got)
+	}
+}
+
+// A tool the descriptor selected is required, whatever the catalog calls it. cosign is optional in
+// the inventory view, where nothing has been chosen and the question is what Draugr could use. Once
+// a descriptor turns on the control cosign is the scanner for, a doctor that still calls it
+// optional reports a clean environment for a scan that cannot run.
+func TestASelectedToolIsRequiredEvenIfTheCatalogCallsItOptional(t *testing.T) {
+	reg := builtins.Registry()
+	model, err := saga.LoadFile(writeSaga(t, doctorSagaProvenance))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, tl := range requiredTools(reg, model) {
+		if tl.Binary != "cosign" {
+			continue
+		}
+		found = true
+		if tl.Optional {
+			t.Error("cosign is provenance's scanner here, so a missing one has to fail doctor")
+		}
+	}
+	if !found {
+		t.Fatal("provenance is enabled, so cosign should be required")
+	}
+}
+
+// The row beside a tool name is where somebody reads what to do about it, so it names the command
+// that fetches the pinned, checksum-verified build rather than an upstream page.
+func TestTheInstallNoteNamesTheCommandWhereThereIsOne(t *testing.T) {
+	if got := installAdvice(tools.Tool{Binary: "notation", InstallHint: "https://notaryproject.dev/x"}); got != "draugr tools install notation" {
+		t.Errorf("advice = %q, want the command", got)
+	}
+	// And the upstream page for one Draugr does not distribute, where the command would succeed
+	// and leave the tool missing.
+	hint := "proprietary; install from the vendor"
+	if got := installAdvice(tools.Tool{Binary: "mend", InstallHint: hint}); got != hint {
+		t.Errorf("advice = %q, want %q", got, hint)
+	}
+	// A hint carrying a prerequisite keeps it, even for a tool the command fetches. kube-bench
+	// ships its benchmarks as a cfg/ tree beside the binary and people install the binary alone,
+	// after which every run dies naming an internal structure rather than the missing directory.
+	// The command does not remove that, so replacing the sentence with it drops the half the
+	// reader is about to need.
+	kb := tools.Catalog()["kube-bench"]
+	if got := installAdvice(kb); got != kb.InstallHint {
+		t.Errorf("advice = %q, want the hint kept: %q", got, kb.InstallHint)
+	}
+	if !strings.Contains(installAdvice(kb), "cfg/") {
+		t.Error("the cfg/ directory is the whole of what somebody gets wrong here")
 	}
 }
 
@@ -488,12 +593,45 @@ func (unknownToolController) Info() plugin.ControllerInfo {
 	return plugin.ControllerInfo{Name: "images", Scope: plugin.ScopeComponent, DefaultScanners: []string{"future"}}
 }
 
-func (unknownToolController) Plan(saga.Model, *saga.Component) ([]plugin.ScanJob, error) {
-	return nil, nil
+// Plans a job, because the selection now asks a control what it would run rather than working it
+// out from its scanner blocks, and a controller that plans nothing needs nothing. A real one with
+// its control enabled and a target to point at plans something.
+func (unknownToolController) Plan(_ saga.Model, comp *saga.Component) ([]plugin.ScanJob, error) {
+	if comp == nil {
+		return nil, nil
+	}
+	return []plugin.ScanJob{{Scanner: "future", Target: plugin.ImageTarget{Ref: "example.test/app"}}}, nil
 }
 
 func (unknownToolController) Aggregate([]sarif.Report) (plugin.ControlResult, error) {
 	return plugin.ControlResult{Control: "images"}, nil
+}
+
+// provenance picks its verifier per image from the matched signer's trust model, so which scanners
+// it needs cannot be read off the descriptor's scanner blocks. Both halves, because a check that
+// only proves notation is absent would pass against a build that never asks for it at all.
+func TestProvenanceRequiresOnlyTheVerifierItsSignersUse(t *testing.T) {
+	reg := builtins.Registry()
+
+	sigstore, err := saga.LoadFile(writeSaga(t, doctorSagaProvenanceSigstore))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := binaries(requiredTools(reg, sigstore))
+	if slices.Contains(got, "notation") {
+		t.Errorf("no x509 signer, so notation never runs and must not be demanded: %v", got)
+	}
+	if !slices.Contains(got, "cosign") {
+		t.Errorf("a keyless signer is verified with cosign: %v", got)
+	}
+
+	x509, err := saga.LoadFile(writeSaga(t, doctorSagaProvenanceX509))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binaries(requiredTools(reg, x509)); !slices.Contains(got, "notation") {
+		t.Errorf("an x509 signer is verified with notation, which has to be installed: %v", got)
+	}
 }
 
 func TestDoctorWithoutADescriptorReportsRatherThanFails(t *testing.T) {

@@ -12,6 +12,54 @@ and move it under a version on release.
 
 _Nothing yet._
 
+## [0.127.0] - 2026-09-18
+
+### Changed
+
+`draugr scan` prints each ranked finding as a block rather than as a row of columns: what it is, then what is known about it, then where. A table sizes every column to its widest value, and one image reference carrying a digest set a width every other finding paid for, so a scan of a real project drew 217 columns on a 120-column terminal and every row wrapped. `--view findings` now fits any terminal, and so does `--view actions`, whose locations were printed with no bound at all.
+
+The `EVIDENCE` block is one label column. Its seven facts were written in four grammars, double-spaced: two labeled with a colon, two as sentences ending in a full stop, one as a sub-heading with its own indented row beneath. They now read as `scanners`, `unverified`, `run`, `scanned`, `sbom`, `feeds`, `descriptor`, `ci` and `gate`, each with its value in the same column, and a value too long for the line wraps under its own label.
+
+A decision in `DECISIONS` leads with the reason somebody gave, and the line under it says who accepted it, how many findings it covers, which rules, and when it lapses. The reason was a bare sentence indented under a row that gave neither what was excused nor, where an acceptance had no end date, anything at all: an exclusion that never expires was indistinguishable from one whose expiry the report failed to record. It now says `no expiry`, names the rules while there are no more than two, and counts them past that.
+
+`--view compact` fits a terminal. It carried seven columns, whose header alone was 144 characters before the summary started, so the dense listing was the widest thing Draugr printed. It now shows the band, the rule, where it is and what to do: severity beside the band teaches a reader to trust the band and this view is for somebody who already knows, a scanner is the same value on nearly every row, and the components are broken out above it.
+
+### Fixed
+
+`draugr doctor` fails when a tool the descriptor selected is missing, whatever the catalog calls it. `cosign` is listed as optional because it is optional to have, and a descriptor that enables the `provenance` control it serves made that reading wrong: doctor reported a clean environment for a scan that could not run.
+
+`draugr doctor` names the command that installs a missing tool, where Draugr has one. A tool it distributes was listed with its upstream page, which fetches whatever version is current rather than the pinned release with its checksum checked, and the summary line under the table named `draugr tools install` at the same time, so one screen gave two answers.
+
+`FIX` names one release where a scanner reported several. Trivy reports one fixed version per maintained branch, so `upgrade to 1.24.13, 1.25.7, 1.26.0-rc.3` was three answers to "which branch are you on" rather than one instruction, and it grew with the number of branches upstream keeps. It now reads `upgrade to 1.24.13 +2`, and the report document carries them all.
+
+`FIX` says what to do about a finding whose scanner reported no package. It said `change the code`, which is the wrong instruction for a CVE in a lockfile, because it keyed off whether package metadata arrived rather than off which control found it. A finding from `sca`, `images` or `licenses` with no package now says `no package reported`. This affects the HTML report as well as the console.
+
+## [0.126.0] - 2026-09-17
+
+### Added
+
+A new `provenance` control checks that a container image is signed by the identity you expect, with `cosign`. Declare your signers once under `config.controls.provenance.signers`, saying which images each covers, and every pipeline applies the same expectation. An image signed by a workload the descriptor does not name is a critical finding, ranked by the exposure and criticality of the component running it. Turn it on with no signers and the run counts how much of what you already run carries a signature, with the identity and issuer of each image in `--format sarif`, which are the two fields a signer is written from. An image no signer covers is reported rather than failed, so the control is useful before it is configured; `unmatched: fail` requires full coverage once you are ready.
+
+A Saga fragment can carry `config.controls.provenance.signers`, so an organization declares who signs its images once and every descriptor includes it. Contributed signers are appended to whatever the descriptor declares rather than replacing them, and `report.json` records which file each one came from under `descriptor.contributed`. The rest of a control's settings are still refused: `unmatched` and `trustRoot` decide what a finding is worth and what is trusted, which stays with whoever answers for the verdict.
+
+An image carrying a GitHub artifact attestation is checked the same way, which is what `actions/attest` with `push-to-registry: true` produces. Set that flag: at its default the attestation is written to GitHub's attestations API and nowhere else, and Draugr reads the registry, so the image reports as unsigned.
+
+The control's account of the run reports `coverage`, `scope` and `pinning` as counts, in the shape the infrastructure control already uses, so the row says the same thing whether a descriptor declares one signer or twenty. Pinning counts the images named by digest rather than by tag, because a tag can be moved to other bytes after the run that verified it.
+
+`provenance` verifies Notary Project signatures too, with `notation`. Declare an `x509:` signer naming the roots a certificate must chain to and the subject it must carry, and Draugr checks images signed that way: an Azure Pipelines build signing with a key in Azure Key Vault, or anything signed by your own certificate authority. Which verifier runs follows from the signer, so a project signing some images with Sigstore and others with a certificate declares both and passes no flag. `draugr tools install notation` provisions the pinned build.
+
+### Changed
+
+The GitHub Action provisions with `draugr tools install --saga`, so setting `tools: true` fetches the scanners your descriptor's scan will run instead of the whole catalog, which is several hundred megabytes. `draugr tools install --all` asks for all of them by name, which is still what no arguments does, and passing it alongside `--saga` or a tool list is an error rather than a precedence rule. The note pointing at `--saga` now finds any `*.saga.yaml` rather than only `draugr.saga.yaml`, and the install plan states how many tools it will fetch even on a host that has none of them.
+
+The HTML report's findings list is a block per finding rather than a seven-column table. A column table cannot hold a rule id, a message, a component, a location and an upgrade at any window width, so the widest column was cropped and the upgrade a reader came for was the one that went. Each finding now reads as its chips, what the rule said, and a line of labeled facts under it, the way the same list reads in the control plane.
+
+The HTML report says what to do about every finding. The old `UPGRADE` column held a version where there was one and nothing at all for a misconfiguration, a hardcoded secret or a flaw in your own code, which is most of what a scan finds. `FIX` answers all of them: `upgrade to 3.3.7-r0`, `change the code`, `no upgrade published`, or `somebody else publishes it` for an image the descriptor declares `builtBy: upstream`.
+
+### Fixed
+
+A control setting of the wrong shape is now refused at `draugr validate` instead of being ignored. `deny: "AGPL-3.0-only"` under `config.controls.licenses` names a real setting, reads as a policy and resolved to an empty list, so the license gate a descriptor was written to apply was not applied and the run passed. Scanner options were already checked this way; a control's own settings now are too, on the project and on a component.
+
 ## [0.125.0] - 2026-09-15
 
 ### Added
@@ -5763,7 +5811,9 @@ First public preview of Draugr.
 - **Early preview** — the CLI and the Saga schema may change before 1.0.
 - Requires **Trivy** on your `PATH` (and `git` for repository scans).
 
-[Unreleased]: https://github.com/draugr-dev/draugr/compare/v0.125.0...HEAD
+[Unreleased]: https://github.com/draugr-dev/draugr/compare/v0.127.0...HEAD
+[0.127.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.127.0
+[0.126.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.126.0
 [0.125.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.125.0
 [0.124.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.124.0
 [0.123.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.123.0

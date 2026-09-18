@@ -49,6 +49,16 @@ type Config struct {
 	// that word belongs in the code rather than in the file people write.
 	Controls map[string]ControllerSettings `yaml:"controls,omitempty"`
 
+	// ControlSources names the fragments each control setting arrived from, keyed
+	// "control.option", for the settings FragmentControlOptions admits.
+	//
+	// A descriptor's own values are not listed: they came from the file in front of the reader.
+	// What this answers is which included file expects an identity nobody reading the descriptor
+	// declared, which is the attribution that makes carrying the setting in a fragment safe.
+	//
+	// Never written by hand, so it is not part of the descriptor's schema.
+	ControlSources map[string][]string `yaml:"-" json:"-"`
+
 	// Controllers is the older spelling, still read so no descriptor breaks.
 	//
 	// Deprecated: write `controls`. Folded into Controls when a descriptor loads, so nothing else
@@ -247,17 +257,23 @@ func (e ExcludeRule) Matches(uri, ruleID string) bool {
 // the common case.
 func matchesAnyRule(patterns []string, ruleID string) bool {
 	for _, p := range patterns {
-		if wildcardMatch(p, ruleID) {
+		if WildcardMatch(p, ruleID) {
 			return true
 		}
 	}
 	return false
 }
 
-// wildcardMatch reports whether s matches pattern, where `*` matches any run of characters.
+// WildcardMatch reports whether s matches pattern, where `*` matches any run of characters.
 // Written out rather than compiled to a regexp: the patterns come from a Saga, and a regexp
 // built from user input is a denial-of-service waiting to be discovered.
-func wildcardMatch(pattern, s string) bool {
+//
+// The dialect for anything whose segments are not path segments: a rule ID, a package name, an
+// image reference. `path.Match` is right for `paths:` and wrong here, because all three contain
+// slashes that a reader does not mean to anchor on. Exported because it is part of what the
+// descriptor means by a pattern, and a second copy would be a second dialect the first time one
+// of them was fixed.
+func WildcardMatch(pattern, s string) bool {
 	parts := strings.Split(pattern, "*")
 	if len(parts) == 1 {
 		return pattern == s // no wildcard: exact match
@@ -703,6 +719,13 @@ type Image struct {
 	// "self" so a descriptor that says nothing keeps describing its own work, which is the common
 	// case for a hand-written one. A surveyed cluster is the case that needs saying.
 	BuiltBy BuiltBy `yaml:"builtBy,omitempty"`
+	// SignedBy names the signer this image is expected to carry, from
+	// `config.controls.provenance.signers`, whatever the signers' own patterns say.
+	//
+	// The exception, not the rule. A signer states which images it covers, so a project whose
+	// registry is its own needs nothing here; this is for the one image that came from somewhere
+	// else, or the one built by a pipeline the others are not.
+	SignedBy string `yaml:"signedBy,omitempty"`
 }
 
 // BuiltBy says who publishes a thing Draugr scans: a repository, an image, or every target on a
@@ -907,6 +930,12 @@ type Fragment struct {
 	// fragment somebody writes by hand has no use for it. It exists so a survey can put the
 	// reasoning beside the value it wrote, where the value gets reviewed.
 	ExposureReasons map[string]string `yaml:"-" json:"-"`
+	// Source names the file this fragment was read from, so what it contributes can be attributed
+	// to it. Set by the resolver, and empty for a fragment a surveyor built in memory.
+	//
+	// Never serialized, for the same reason as ExposureReasons: it is a fact about where the
+	// document came from rather than part of the document.
+	Source string `yaml:"-" json:"-"`
 }
 
 // FragmentConfig is the part of Config a fragment is allowed to set.
@@ -918,6 +947,13 @@ type FragmentConfig struct {
 	// Exclude suppresses findings that match, with a stated reason. Appended to whatever the
 	// descriptor and other fragments already carry.
 	Exclude []ExcludeRule `yaml:"exclude,omitempty"`
+	// Controls carries the control settings a fragment is allowed to contribute, which is a short
+	// list held in FragmentControlOptions rather than everything a descriptor may write.
+	//
+	// Appended, never replacing, and refused outright for anything not on that list. A fragment
+	// that could reach a control's settings in full could switch it off, which is the one thing
+	// including a file must never be able to do.
+	Controls map[string]ControllerSettings `yaml:"controls,omitempty"`
 }
 
 // ControllerEnabled reports whether the named controller is enabled at the project level.

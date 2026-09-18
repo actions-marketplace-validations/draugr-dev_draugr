@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -48,8 +49,15 @@ func checkControlNames(reg *engine.Registry, model *saga.Model) error {
 	// that is one of these is a setting; a key that is neither this nor a scanner is a mistake,
 	// whatever shape its value has.
 	optionsFor := map[string]map[string]bool{}
+	// The schema behind those names, so what a setting *says* can be checked as well as whether
+	// it exists. Held separately because the name list is consulted on every key and the schema
+	// only on the ones that turn out to be settings.
+	optionSchemaFor := map[string]json.RawMessage{}
 	for _, c := range reg.Controllers() {
 		info := c.Info()
+		if len(info.OptionSchema) > 0 {
+			optionSchemaFor[info.Name] = info.OptionSchema
+		}
 		for _, opt := range plugin.Options(info.OptionSchema) {
 			if optionsFor[info.Name] == nil {
 				optionsFor[info.Name] = map[string]bool{}
@@ -155,11 +163,49 @@ func checkControlNames(reg *engine.Registry, model *saga.Model) error {
 				optionProblem = true
 			}
 		}
+		// And the control's own settings, held to the same standard as a scanner's.
+		//
+		// A name that exists is not a value that works. `deny: "AGPL-3.0-only"` names a real
+		// setting, reads as a policy, and yields an empty list, so the gate the descriptor was
+		// written to apply is not applied and the run is green. A control's settings are policy
+		// more often than a scanner's are, which makes a silent one worse here than anywhere else.
+		schema, has := optionSchemaFor[control]
+		if !has {
+			return
+		}
+		cfg := plugin.Config{}
+		for _, key := range sortedKeys(settings) {
+			if optionsFor[control][key] {
+				cfg[key] = settings[key]
+			}
+		}
+		if len(cfg) == 0 {
+			return
+		}
+		if err := plugin.ValidateConfig(schema, cfg); err != nil {
+			problems = append(problems, fmt.Sprintf("%s.%s: %v", where, control, err))
+			optionProblem = true
+		}
 	}
 
 	for _, name := range sortedKeys(model.Config.Controls) {
 		report("config.controls", name)
 		reportScanners("config.controls", name, model.Config.Controls[name])
+	}
+	// What a control's settings mean together, which only the control knows. A schema says whether
+	// a signer is well formed; whether an image names one that was declared is a different
+	// question, and the answer to it decides whether anything gets checked at all.
+	for _, c := range reg.Controllers() {
+		v, ok := c.(plugin.Validator)
+		if !ok {
+			continue
+		}
+		// Reported as the control wrote it. Each of these already names where in the descriptor
+		// it is, and a control's own prefix on top of that reads as two locations for one mistake.
+		for _, err := range v.Validate(*model) {
+			problems = append(problems, err.Error())
+			optionProblem = true
+		}
 	}
 	// An analyzer this build cannot run is the same failure as a control it cannot run: the
 	// descriptor says findings will be ranked by reachability, and they silently are not.

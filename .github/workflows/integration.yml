@@ -1,20 +1,23 @@
 name: Integration
 
 # Integration tests exercise real external dependencies, a real Trivy binary and an
-# ephemeral kind cluster, that the unit tests stub out (see issue #39). They are heavier and
-# slower than unit tests, so they do NOT run on every PR: they run on main, on a nightly
-# schedule, on demand, and on a PR that either carries the `ci-integration` label or changes the
-# suite itself.
+# ephemeral kind cluster, that the unit tests stub out (see issue #39). They run on every pull
+# request, on main, on a nightly schedule, on demand, and against a release tag.
 #
-# That second condition is not a convenience. A pull request adding an integration test would
-# otherwise merge without the job that runs it ever having run, the test looks reviewed, is
-# green, and has never executed. Nothing about that is visible in the checks: a skipped job reads
-# much like a passing one.
+# Being required is what makes running unconditionally part of the same decision. A required check
+# that never runs is never reported, and a pull request waiting on a report that will not arrive
+# cannot merge at all.
 #
-# Advisory on a pull request, and binding on a release. A required check on every PR would make
-# most changes wait several minutes on a kind cluster to learn something a unit test already
-# said; a release is the one moment the cost is obviously worth it, because it is the moment the
-# artifact reaches people. So release.yml calls this and refuses to publish without it.
+# This suite is the only place several behaviors are checked against real tools, real registries
+# and a real cluster rather than against fixtures, so it is the only place their failure is visible
+# before a release tag. Deciding when to run it from a path filter means naming every package those
+# assertions depend on, including the ones that merely produce what the tests read back, and a
+# filter that misses one turns a failure into a skipped job. Nothing in the checks tells a reader
+# those apart.
+#
+# The cost is several minutes on a kind cluster for every pull request, including the ones that
+# could not break it. That is deliberate. A release nobody has to re-check afterwards is worth more
+# than a fast docs change.
 
 on:
   push:
@@ -23,9 +26,7 @@ on:
     - cron: "23 6 * * *" # nightly at 06:23 UTC
   workflow_dispatch:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
-  # Called by release.yml against the tag. The `if:` below resolves to "run" because the caller's
-  # event is a push, which is what a tag is, the label opt-in only applies to pull requests.
+  # Called by release.yml against the tag.
   workflow_call:
     inputs:
       ref:
@@ -57,65 +58,8 @@ env:
   KUBE_BENCH_COMMIT: "92e522b9ac82d4253e8b7582de1e75f5dae1f4b5"
 
 jobs:
-  # Whether this pull request changes the suite itself. A job cannot look at the diff from an
-  # `if:`, so the answer has to be computed first and handed over.
-  suite:
-    name: Detect suite changes
-    runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.filter.outputs.changed }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Need the base commit to diff against; a shallow clone has only the tip.
-          fetch-depth: 0
-      - id: filter
-        run: |
-          set -euo pipefail
-          base="${{ github.event.pull_request.base.sha }}"
-          if [ -z "$base" ]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          # The suite is the tests, the tag they hide behind, and the workflow that runs them.
-          # A change to any of the three is a change nobody can review by reading a green tick.
-          #
-          # pkg/report is in the list because several of these tests assert on what a real scan
-          # printed, that a spec-driven scan named the operations it was not allowed to send,
-          # that a repository scan named the revision it read. Those assertions are the only
-          # place a coverage statement is checked against a real run rather than a fixture, so
-          # they break on a rendering change, and every other job stays green while they do.
-          # The next thing to run them would be the release tag, which is the most expensive
-          # moment to learn it.
-          #
-          # pkg/skald for the same reason, one directory over: it writes the two artifacts those
-          # tests then read back, the SARIF they parse to name the tools a scan really ran, and
-          # the JSON evidence document. "Rendering" is not only what a terminal shows, and a
-          # filter that names the renderer but not the writer covers the half with the loudest
-          # failure rather than the half a pipeline consumes.
-          # internal/tools because this job provisions the real scanners with `tools install`,
-          # and that is the only place provisioning runs against the actual registries rather
-          # than a stubbed toolchain. A unit test can prove the code calls what it meant to; it
-          # cannot prove pip, npm or the Go toolchain answer, which is the half that breaks.
-          if git diff --name-only "$base" HEAD \
-             | grep -qE '^(test/integration/|pkg/report/|pkg/skald/|internal/tools/|\.github/workflows/integration\.yml$)'; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
   integration:
     name: Integration (kind + real scanners)
-    needs: suite
-    # Always off a pull request, unless somebody opted in, or unless the pull request changes the
-    # suite, in which case running it is not optional: merging a test the job never ran is how a
-    # suite quietly stops meaning anything.
-    # No always(): if the detection job fails, this one is skipped and the workflow is red, which
-    # is visible. Running anyway on an empty output would put the decision back where it started,
-    # a suite-changing pull request merging without the suite having run, and nothing saying so.
-    if: >-
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'ci-integration') ||
-      needs.suite.outputs.changed == 'true' 
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -198,3 +142,82 @@ jobs:
         # fetched above. It is listed explicitly because ./test/integration/... would not reach it,
         # and a drift guard that never runs is the failure it was written to prevent.
         run: go test -tags integration -v -timeout 15m ./test/integration/... ./internal/scanners/...
+
+  # A red suite on main has to reach a person.
+  #
+  # Requiring it on pull requests narrows how main goes red without closing it: two pull requests
+  # each green against their own base can be red together, the nightly run judges a tree nobody
+  # pushed that day, and this suite depends on registries and images that move on their own
+  # schedule. In all three the failure arrives when nobody is looking at a checks page. The site's
+  # own scan carries this same job for the same reason: a check that is only a color on a page
+  # somebody has already closed is not a signal.
+  #
+  # One issue, reused, closed when the suite is green again. A fresh issue per red run turns one
+  # slow-moving break into a week of duplicates, and closing on green is what makes an open one
+  # mean "red now" rather than "was red once".
+  notify:
+    name: A red suite on main raises an issue
+    needs: integration
+    # Not on pull requests: the author is looking at the failing check already, and an issue would
+    # be telling them what their own screen says.
+    if: always() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the issue
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          RESULT: ${{ needs.integration.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            // Through the API rather than the `gh` binary, so the notifier does not depend on what
+            // happens to be installed on the machine it lands on. It exists to speak up when the
+            // suite cannot, and one that dies with "command not found" is a silence with a red
+            // tick on it.
+            const label = "integration-red";
+            const { owner, repo } = context.repo;
+            const sha = context.sha.slice(0, 8);
+            const commit = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/commit/${context.sha}`;
+
+            await github.rest.issues.createLabel({
+              owner, repo, name: label, color: "B60205",
+              description: "The integration suite is failing on main",
+            }).catch(() => {}); // already there
+
+            const open = await github.rest.issues.listForRepo({
+              owner, repo, labels: label, state: "open", per_page: 1,
+            });
+            const existing = open.data[0];
+
+            if (process.env.RESULT !== "failure") {
+              if (!existing) return console.log("green, and nothing open");
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Green again as of \`${sha}\`. Closing, because an open issue with this label means the suite is failing now rather than that it failed once.`,
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: "closed" });
+              return console.log(`closed #${existing.number}`);
+            }
+
+            const body = [
+              `The integration suite is failing on main as of [\`${sha}\`](${commit}).`,
+              "",
+              `[The run](${process.env.RUN_URL}) has the log.`,
+              "",
+              "**This suite is the only place several behaviors are checked against real tools and real registries rather than fixtures.** It is skipped on a pull request whose diff does not touch the paths it covers, so a change can reach main without it ever having run, and it is not a required check, so a failure does not block a merge either.",
+              "",
+              "This issue closes itself when the suite is green again.",
+            ].join("\n");
+
+            if (existing) {
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+              return console.log(`updated #${existing.number}`);
+            }
+            const made = await github.rest.issues.create({
+              owner, repo, labels: [label], body,
+              title: "The integration suite is failing on main",
+            });
+            console.log(`opened #${made.data.number}`);

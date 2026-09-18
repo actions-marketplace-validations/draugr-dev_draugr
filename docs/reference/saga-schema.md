@@ -78,6 +78,8 @@ components:
       - image: registry.example.com/acme/web:1.0  # required
         builtBy: self                             # optional, overrides the component's
         digest: sha256:…                          # optional. Pin the immutable content digest
+        signedBy: our-ci                          # optional. The provenance signer to expect here,
+                                                  # whatever that signer's own patterns say
     hosts:
       - name: api
         url: https://api.example.com            # required
@@ -668,6 +670,63 @@ Two things follow that are worth knowing when reading a build log:
 With neither the URL nor the token set, the publisher **skips**, so the same descriptor a pipeline
 uses still runs on a developer's machine. Setting one without the other is an error: a scan that
 silently did not publish is one somebody believes was published.
+
+## Provenance signers (`controls.provenance`)
+
+```yaml
+config:
+  controls:
+    provenance:
+      enabled: true
+      unmatched: observe          # observe (default) | warn | fail
+      trustRoot: .draugr/sigstore-root.json   # optional, for a runner with no egress
+      signers:
+        - name: our-ci            # required. How an image's signedBy refers to it
+          images: ["ghcr.io/acme/*"]          # what this signer covers; * spans any characters
+          github:                             # a GitHub Actions signer, written as its parts
+            repository: acme/ci-workflows
+            workflow: .github/workflows/build-image.yml
+            ref: refs/tags/v3
+        - name: chainguard
+          images: ["cgr.dev/chainguard/*"]
+          keyless:                            # the general form, one field per cosign flag
+            issuer: https://token.actions.githubusercontent.com
+            identityRegexp: ^https://github\.com/chainguard-images/images/.*$
+        - name: acme-pki
+          images: ["acme.azurecr.io/*"]
+          x509:                               # a Notary Project signature, checked with notation
+            trustStore: .draugr/truststore/acme-ca.pem
+            subject: "C=US, ST=WA, O=Acme, CN=Acme Release Signing"
+```
+
+Checks that each image is signed by the identity declared for it.
+
+A signer declares exactly one of `keyless`, `github` and `x509`, because a signature is checked one
+way. `keyless` takes an `issuer` and one of `identity` or `identityRegexp`; `github` takes the three
+parts and expands to the same thing, which `draugr validate` prints; `x509` takes a PEM file of
+root certificates and the subject the signing certificate must carry.
+
+**Which verifier runs follows from that.** `keyless` and `github` go to `cosign`, `x509` goes to
+`notation`, and an image no signer covers goes to `cosign`, which is the only one that can read
+back a signer nobody named. A project signing some images with Sigstore and others with a
+certificate declares both kinds and needs no flag.
+
+**An identity is not optional.** A signer with none would accept a signature from anybody, which
+is the failure this control exists to catch, and it is refused rather than treated as a default.
+
+**Which signer covers an image:** the one its `signedBy` names, or the one whose `images` patterns
+match. Two signers matching one image is refused; narrow the patterns, or name one with `signedBy`.
+An image no signer covers is observed, and `unmatched` decides what that absence is worth.
+
+A component's signers are **added to** the project's rather than replacing them, the same way the
+license policy is unioned. A component that replaced the list could stop checking most of what it
+runs while still reading as a policy.
+
+`builtBy` is not consulted here. `draugr survey` records images with no `builtBy`, which resolves
+to `self`, so keying on it would expect the organization's own signer on every sidecar in a
+surveyed namespace.
+
+See the [how-to](../guides/provenance.md) for finding the identity your builds already sign with.
 
 ## License policy (`controls.licenses`)
 
@@ -1445,7 +1504,7 @@ did, under `--evidence`:
 
 ```
 EVIDENCE
-  SBOM: 2 documents (cyclonedx-json)
+  sbom        2 documents (cyclonedx-json)
 ```
 
 ### One document per target, or one per product
@@ -1472,7 +1531,7 @@ config:
 
 ```
 EVIDENCE
-  SBOM: 1 project document (cyclonedx-json)
+  sbom        1 project document (cyclonedx-json)
 ```
 
 The assembled document is written as `sbom-project.cdx.json`. Its root component is the release,
@@ -1536,11 +1595,26 @@ fragments:
 | `url` | A git repository to read from. Omit for a local path. |
 | `revision` | Branch, tag or commit. **Required with `url`**, and not defaulted. See below. |
 
-**A fragment adds scope or adds attributed suppressions; it cannot change policy.** It may carry
-`components`, `config.exclude`, and further `fragments`. Nothing else. `release`, `config.gate` and
-`config.controls` are rejected, naming the rule. That is what makes a `fragments:` line safe to
-review: pulling a file in can never quietly lower your gate or switch a control off, and the worst
-it can do is add suppressions, which are individually attributed and counted in the report.
+**A fragment adds scope, adds attributed suppressions, or contributes a setting that can only add
+findings. It cannot change policy.** It may carry `components`, `config.exclude`, further
+`fragments`, and the short list of control settings in the table below. Nothing else. `release`,
+`config.gate` and any other control setting are rejected, naming the rule. That is what makes a
+`fragments:` line safe to review: pulling a file in can never quietly lower your gate or switch a
+control off, and the worst it can do is add suppressions, which are individually attributed and
+counted in the report.
+
+| Setting a fragment may contribute | What it does |
+|---|---|
+| `config.controls.provenance.signers` | Adds signers to the descriptor's own, so an organization can declare who signs what once and include it everywhere. |
+
+A contributed setting is **appended, never assigned**: the descriptor's own values stay, and the
+fragment's are added after them. `report.json` records which file each one came from, under
+`descriptor.contributed`, so a reviewer can find out which included file expects an identity nobody
+reading the descriptor declared.
+
+`config.controls.provenance.unmatched` and `trustRoot` are **not** on the list. Whether an
+uncovered image is a gap or a fact about the ecosystem, and which certificate roots are trusted,
+stay with whoever answers for the verdict.
 
 **A pattern that matches nothing is an error.** Somebody wrote the line on purpose, so silence from
 it is indistinguishable from a typo, and the result would be a descriptor scanning less than it
