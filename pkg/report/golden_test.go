@@ -50,6 +50,8 @@ func TestConsoleGolden(t *testing.T) {
 		{"grouped", goldenGroupedData()},
 		// --evidence, which is the auditor's view: the same run with what stands behind it.
 		{"evidence", goldenEvidenceData()},
+		// --view compact. Nothing pinned it, so it was rewritten and no test noticed.
+		{"compact", goldenCompactData()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// No terminal width, whatever the shell running the tests thinks. The compact listing
@@ -103,7 +105,8 @@ func goldenMismatch(path string) string {
 		"       docs/concepts/principles.md, docs/concepts/what-to-fix-first.md,\n" +
 		"       docs/guides/findings-in-your-editor.md, docs/guides/caching-and-performance.md\n" +
 		"  5. update the blog posts in the draugr.dev repo that quote console output:\n" +
-		"     src/content/blog/{security-scan-with-zero-config,what-scanner-output-costs-your-agent}.md\n" +
+		"     src/content/blog/{security-scan-with-zero-config,what-scanner-output-costs-your-agent,\n" +
+		"                       what-to-fix-first}.md\n" +
 		"     (grep for 'FIX FIRST' there; they are a separate repo, so nothing else will catch them)\n"
 }
 
@@ -124,7 +127,11 @@ func goldenFullData() Data {
 		{RuleID: "CVE-2019-10906", Level: sarif.LevelError, Score: 8.6, HasScore: true, Priority: "P1",
 			Tool: "trivy", Component: "payments", Location: sarif.Location{URI: "app/requirements.txt", StartLine: 5},
 			Message: "python-jinja2: str.format_map allows sandbox escape",
-			Package: &sarif.Package{Name: "jinja2", Version: "2.10", FixedVersion: "2.10.1", Ecosystem: "pip"}},
+			// Several fixed versions, one per maintained branch, which is what trivy reports for a
+			// stdlib advisory. Unbounded it ran the row past the terminal; pinned here so it stays
+			// a phrase.
+			Package: &sarif.Package{Name: "jinja2", Version: "2.10",
+				FixedVersion: "2.10.1, 2.11.3, 3.0.0-rc.1", Ecosystem: "pip"}},
 		{RuleID: "CVE-2018-1000656", Level: sarif.LevelWarning, Score: 7.5, HasScore: true, Priority: "P2",
 			Tool: "trivy", Component: "internal-tool", Location: sarif.Location{URI: "app/requirements.txt", StartLine: 2},
 			Message: "python-flask: Denial of Service via crafted JSON file"},
@@ -257,6 +264,7 @@ func goldenEnrichedData() Data {
 		{RuleID: "CVE-2024-3094", Level: sarif.LevelError, Score: 8.1, HasScore: true, Priority: "P1",
 			Tool: "trivy", Location: sarif.Location{URI: "go.mod", StartLine: 12},
 			Message: "xz: malicious code in the upstream tarballs",
+			Package: &sarif.Package{Name: "github.com/ulikunitz/xz", Version: "0.5.11", FixedVersion: "0.5.12"},
 			Escalation: &sarif.Escalation{
 				From: sarif.SeverityHigh, To: sarif.SeverityCritical,
 				Signal: "kev", Detail: "on KEV", AsOf: "2026-08-01",
@@ -264,6 +272,7 @@ func goldenEnrichedData() Data {
 		{RuleID: "CVE-2019-20477", Level: sarif.LevelWarning, Score: 6.5, HasScore: true, Priority: "P1",
 			Tool: "trivy", Location: sarif.Location{URI: "app/requirements.txt", StartLine: 4},
 			Message: "PyYAML: command execution through python/object/apply constructor",
+			Package: &sarif.Package{Name: "PyYAML", Version: "3.13", FixedVersion: "5.2"},
 			Escalation: &sarif.Escalation{
 				From: sarif.SeverityMedium, To: sarif.SeverityHigh,
 				Signal: "epss", Detail: "EPSS 0.87", AsOf: "2026-08-02",
@@ -272,7 +281,8 @@ func goldenEnrichedData() Data {
 		// note means something.
 		{RuleID: "CVE-2018-1000656", Level: sarif.LevelWarning, Score: 7.5, HasScore: true, Priority: "P2",
 			Tool: "trivy", Location: sarif.Location{URI: "app/requirements.txt", StartLine: 2},
-			Message: "python-flask: Denial of Service via crafted JSON file"},
+			Message: "python-flask: Denial of Service via crafted JSON file",
+			Package: &sarif.Package{Name: "flask", Version: "0.12.2", FixedVersion: "0.12.3"}},
 	}
 	run := engine.Result{
 		Controls: map[string]plugin.ControlResult{
@@ -305,9 +315,26 @@ func goldenGroupedData() Data {
 }
 
 // goldenEvidenceData is the full fixture rendered with --evidence.
+// goldenCompactData is the dense listing: one line per finding, for a reader who already knows
+// what they are looking at.
+func goldenCompactData() Data {
+	d := goldenGroupedData()
+	d.View = ViewCompact
+	return d
+}
+
 func goldenEvidenceData() Data {
 	d := goldenGroupedData()
 	d.Evidence = true
+	// One verified build and one Draugr cannot vouch for, because the evidence block renders them
+	// on separate rows and nothing else exercises that path. It went unrendered in every golden
+	// until a real scan showed the row printing its own label beside the column's.
+	d.Tools = []ToolBuild{
+		{Name: "trivy", Version: "0.69.3", Level: "pinned"},
+		{Name: "semgrep", Version: "1.169.0", Level: "external",
+			Reason: "found on PATH; Draugr did not install it, `draugr tools install semgrep` " +
+				"provisions a pinned build"},
+	}
 	return d
 }
 

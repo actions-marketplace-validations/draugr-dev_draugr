@@ -364,25 +364,19 @@ func fixFirstHeading(col tui.Painter, s summary, shown, total int) string {
 // path. Both it and Repository appear only where they tell rows apart, so the common project keeps
 // the narrow frame.
 func fixFirstColumns(fs []finding, compact bool) []string {
-	cols := []string{"Priority", "Severity", "Rule", "Scanner"}
-	if manyComponents(fs) {
-		cols = append(cols, "Component")
-	}
+	cols := []string{"Priority", "Rule"}
 	// A component may hold several repositories, and paths are repository-relative, so the same
 	// file in two of them produces rows identical in every column. The reader sees a duplicate and
 	// has no way to learn otherwise.
 	if manyRepositories(fs) {
 		cols = append(cols, "Repository")
 	}
-	cols = append(cols, "Location")
-	// What to upgrade, last, where a column costs no padding: nothing follows it, so its width is
-	// whatever each row needs. It was the first half of the line underneath, taking the room the
-	// advisory's own sentence needed and pushing the end of that sentence off the screen.
-	if slices.ContainsFunc(fs, func(f finding) bool { return upgradeLabel(f) != "" }) {
-		cols = append(cols, "Upgrade")
-	}
+	cols = append(cols, "Location", "Fix")
 	// The explanation, for a listing that has no line underneath to put it on. Absent where no
 	// finding carries one, which is every run of a scanner that reports rule ids and nothing else.
+	//
+	// Last, so Fit spends what is left on it and renders nothing where nothing is left. It is the
+	// one column here that is readable shortened and still worth having gone.
 	if compact && slices.ContainsFunc(fs, func(f finding) bool { return f.message != "" }) {
 		cols = append(cols, "Summary")
 	}
@@ -449,54 +443,53 @@ func shortRepository(url string) string {
 	return strings.Join(parts, "/")
 }
 
-// renderFixFirst prints the ranked findings as an aligned table with a header row, each
-// finding's own message on a dimmed line beneath it.
+// renderFixFirst prints the ranked findings: a block each by default, one row each under
+// --view compact.
 func renderFixFirst(w io.Writer, col tui.Painter, fs []finding, compact bool, blobs blobLinker) {
+	if !compact {
+		renderFixFirstBlocks(w, col, fs, blobs)
+		return
+	}
 	cols := fixFirstColumns(fs, compact)
 	has := func(name string) bool { return slices.Contains(cols, name) }
 	t := tui.NewTable(col, cols...).Indent("  ").StyledNotes()
-	if compact {
-		// The one listing whose last column is prose, and the one that has to fit: its whole
-		// argument is that a reader can see how much there is, which a row wrapping onto two lines
-		// takes away. Zero where the destination has no width to respect, and then the summary is
-		// bounded by messageWidth like every other sentence Draugr prints.
-		t.Fit(tui.Columns(w))
-	}
+	// The one listing whose last column is prose, and the one that has to fit: its whole argument
+	// is that a reader can see how much there is, which a row wrapping onto two lines takes away.
+	// Zero where the destination has no width to respect, and then the summary is bounded by
+	// messageWidth like every other sentence Draugr prints.
+	t.Fit(tui.Columns(w))
+
+	// Four columns, where there were seven. Severity, Scanner and Component went because this view
+	// is documented as the one for a reader who already knows what they are looking at: severity
+	// beside the band teaches somebody to trust the band, a scanner is the same value on nearly
+	// every row, and the components are broken out above. Seven columns could not fit a terminal
+	// at all, and the ones that went are the ones whose absence a reader here does not feel.
 	for _, f := range fs {
-		sev := rankedSeverity(f)
 		cells := []tui.Cell{
-			band(f, compact),
-			tui.Styled(severityColor(sev), string(sev)),
-		}
-		cells = append(cells,
-			// A rule id names a finding; it doesn't explain it. The link is where a reader
-			// finds out what it means, and it costs no width.
-			tui.Cell{Text: shortRuleID(f.ruleID), URL: f.helpURI},
-			// Lowercased. Half these names are what the tool calls itself in its own report
-			// ("Trivy") and half are what Draugr runs it as ("trivy"), so one column showed one
-			// tool under two spellings and read as two different scanners.
-			tui.PlainCell(strings.ToLower(dash(f.tool))))
-		if has("Component") {
-			cells = append(cells, tui.PlainCell(dash(f.component)))
+			// The band keeps its mark, so a listing of several hundred still says which rows were
+			// argued with, even though the name of the argument only appears in the default view.
+			band(f, true),
+			// A rule id names a finding; it doesn't explain it. The link is where a reader finds
+			// out what it means, and it costs no width.
+			{Text: shortRuleID(f.ruleID), URL: f.helpURI},
 		}
 		if has("Repository") {
 			cells = append(cells, tui.PlainCell(dash(shortRepository(f.repository))))
 		}
-		cells = append(cells, tui.Cell{Text: dash(f.location), URL: blobs.forFinding(f)})
-		if has("Upgrade") {
-			cells = append(cells, upgradeCell(f))
-		}
-		if compact {
+		cells = append(cells,
+			// The same shortening the actions view has always used: one image carrying a
+			// 71-character digest would otherwise set a width every other row pays for.
+			tui.Cell{Text: dash(displayLocation(f)), URL: blobs.forFinding(f)},
+			// The phrase rather than the version diff, which is what the other two views say and
+			// is a fixed short width. `jinja2 2.10 → 2.10.1` is as long as the names in it, and it
+			// was the column that clipped first.
+			tui.Styled(tui.StyleFixed, fixPhrase(f)))
+		if has("Summary") {
 			// The explanation on the row rather than under it. That is what this view buys: one
 			// line per finding, so a reader can see how much there is without scrolling.
 			cells = append(cells, tui.PlainCell(elide(findingTitle(f), messageWidth)))
-			// One line, and no more. A band something argued with is marked beside the band
-			// itself, so the listing still says which rows were argued with; what it gives up is
-			// the name of the argument, which is what the default view is for.
-			t.Row(cells...)
-			continue
 		}
-		t.RowWithNotes(notesFor(col, f), cells...)
+		t.Row(cells...)
 	}
 	t.Render(w)
 }
@@ -518,21 +511,6 @@ func upgradeLabel(f finding) string {
 		return label + " → " + f.pkg.FixedVersion
 	}
 	return label + ", no fix available"
-}
-
-// upgradeCell paints it: the release that ends the finding wears the color a passing verdict
-// wears, which is what the dashboard does with the same fact for the same reason.
-func upgradeCell(f finding) tui.Cell {
-	label := upgradeLabel(f)
-	if f.pkg == nil || f.pkg.FixedVersion == "" {
-		return tui.Styled(cDim, label)
-	}
-	return tui.Cell{
-		Text:      strings.TrimSuffix(label, " → "+f.pkg.FixedVersion) + " →",
-		Style:     cDim,
-		Note:      f.pkg.FixedVersion,
-		NoteStyle: tui.StyleFixed,
-	}
 }
 
 // notesFor is the lines under a row: what the finding is, and anything that argued with its band.
@@ -1189,7 +1167,7 @@ func exploitabilityLine(feeds []FeedProvenance) string {
 		}
 		parts = append(parts, part)
 	}
-	return "Exploitability: " + strings.Join(parts, " · ")
+	return strings.Join(parts, " · ")
 }
 
 // unpinnedCacheLine names the images whose findings came from a cache entry that could not be
@@ -1250,7 +1228,7 @@ func runLine(st engine.Stats) string {
 	if st.Jobs == 0 || st.Duration <= 0 {
 		return ""
 	}
-	line := fmt.Sprintf("Ran %s in %s", plural(st.Jobs, "job"), st.Duration.Round(time.Millisecond))
+	line := fmt.Sprintf("%s in %s", plural(st.Jobs, "job"), st.Duration.Round(time.Millisecond))
 	// Only where it bound the run. Concurrency is a ceiling, and a run with fewer jobs than the
 	// ceiling never reached it: "30 jobs, 32 at a time" is arithmetic that does not add up, and a
 	// reader who tries to make it add up is reading a number that was never going to help them.
@@ -1274,7 +1252,9 @@ func runLine(st engine.Stats) string {
 	if w := waitSummary(st.ToolWaits); w != "" {
 		line += " · " + w
 	}
-	return line + "."
+	// No full stop. It is a row in a label column now, not a sentence, and it was the only one of
+	// the seven that ended in one.
+	return line
 }
 
 // roundAge renders a cache entry's age at the precision a reader acts on.
@@ -1359,13 +1339,13 @@ func toolBuildLines(tools []ToolBuild) []string {
 	sort.Strings(verified)
 	sort.Strings(other)
 
+	// The fact, not its label. The evidence block puts "scanners" and "unverified" in a column of
+	// their own, and a line that names itself as well says it twice.
 	var out []string
 	if len(verified) > 0 {
-		out = append(out, "Scanners: "+strings.Join(verified, ", "))
+		out = append(out, strings.Join(verified, ", "))
 	}
-	for _, o := range other {
-		out = append(out, "Scanner (unverified): "+o)
-	}
+	out = append(out, other...)
 	return out
 }
 
@@ -1423,11 +1403,11 @@ func sbomLine(docs []sbom.Document) string {
 	}
 	switch {
 	case project && parts > 0:
-		return fmt.Sprintf("SBOM: 1 project document + %s (%s)", plural(parts, "component document"), docs[0].Format)
+		return fmt.Sprintf("1 project document + %s (%s)", plural(parts, "component document"), docs[0].Format)
 	case project:
-		return fmt.Sprintf("SBOM: 1 project document (%s)", docs[0].Format)
+		return fmt.Sprintf("1 project document (%s)", docs[0].Format)
 	default:
-		return fmt.Sprintf("SBOM: %s (%s)", plural(parts, "document"), docs[0].Format)
+		return fmt.Sprintf("%s (%s)", plural(parts, "document"), docs[0].Format)
 	}
 }
 
@@ -1715,39 +1695,74 @@ func writeAccepted(w io.Writer, col tui.Painter, d Data, full bool) {
 		_, _ = fmt.Fprintln(w)
 	}
 	draw("Accepted", rows)
-	draw("Decisions", decisionRows(d, full))
+	writeDecisions(w, col, d, full)
 	draw("Unmatched", unmatched)
 }
 
-// decisionRows accounts for each acceptance separately, under --evidence.
+// writeDecisions accounts for each acceptance separately, under --evidence.
 //
-// The counted line answers how much was set aside and cannot answer what was acceptable about it,
-// though every suppressed finding carries the reason somebody gave. One row per decision: how many
-// it covers, who signed it, when it lapses, and why, which is the question an auditor arrives with
-// and the one the terminal could not answer at all.
-//
-// Only under --evidence. A developer deciding what to fix did not ask who signed what, and the
-// file reports are where this belongs when somebody is keeping it.
-func decisionRows(d Data, full bool) []acceptedRow {
-	if !full {
-		return nil
+// The reason leads, on a line of its own, because it is the only part a reader has to judge. Who
+// signed it, what it covers and when it lapses are facts to check the judgment against, and they
+// were what the row led with while the judgment sat underneath at an indent that made it read as a
+// caption rather than as the thing under review.
+func writeDecisions(w io.Writer, col tui.Painter, d Data, full bool) {
+	decs := decisions(d)
+	if !full || len(decs) == 0 {
+		return
 	}
-	var out []acceptedRow
-	for _, dec := range decisions(d) {
-		said := []string{plural(dec.n, "finding")}
-		if dec.expires != "" {
-			said = append(said, "expires "+dec.expires)
+	_, _ = fmt.Fprintln(w, heading(col, "Decisions"))
+	for i, dec := range decs {
+		if i > 0 {
+			_, _ = fmt.Fprintln(w)
 		}
-		out = append(out, acceptedRow{
-			where: dec.by,
-			said:  said,
-			// A suppression nobody signed is the one an auditor cannot follow up, so it is the only
-			// row here that is lit.
-			lit:   dec.by == "unattributed",
-			notes: []string{findingSummary(dec.reason)},
-		})
+		_, _ = fmt.Fprintf(w, "  %s\n", elide(findingSummary(dec.reason), messageWidth))
+
+		who := col.Paint(tui.StyleStrong, dec.by)
+		if dec.by == "unattributed" {
+			// The one an auditor cannot follow up, so it is the only one lit.
+			who = col.Paint(cAccent, dec.by)
+		}
+		parts := []string{
+			col.Paint(cDim, "accepted by") + " " + who,
+			col.Paint(cDim, "covers") + " " + plural(dec.n, "finding"),
+		}
+		if said := decisionRules(dec.rules); said != "" {
+			parts = append(parts, said)
+		}
+		parts = append(parts, col.Paint(cDim, lapses(dec.expires)))
+		_, _ = fmt.Fprintf(w, "  %s\n", strings.Join(parts, col.Paint(cDim, " · ")))
 	}
-	return out
+	_, _ = fmt.Fprintln(w)
+}
+
+// decisionRules names the rules a decision excused while a reader can hold them, and counts them
+// once they cannot.
+//
+// Two is the line. One rule is the thing excused, and two is still a pair somebody can check the
+// reason against. Past that the list stops being read and starts being skipped, and a count says
+// as much in four characters. The full list is in the report document, for anyone comparing.
+func decisionRules(rules []string) string {
+	switch {
+	case len(rules) == 0:
+		return ""
+	case len(rules) <= maxNamedRules:
+		return strings.Join(rules, ", ")
+	}
+	return plural(len(rules), "rule")
+}
+
+// maxNamedRules is how many rules a decision names before counting them instead.
+const maxNamedRules = 2
+
+// lapses says when an acceptance ends, including when it does not.
+//
+// Always, because an acceptance with no end date is a decision somebody made, and saying nothing
+// left it indistinguishable from an expiry the report failed to record.
+func lapses(expires string) string {
+	if expires == "" {
+		return "no expiry"
+	}
+	return "expires " + expires
 }
 
 // claimSummary names a supplier statement nothing matched, by what it is about.
@@ -1835,6 +1850,13 @@ func externalLine(external []finding) string {
 // renderActions draws the action rows.
 func renderActions(w io.Writer, col tui.Painter, actions []action, compact bool) {
 	const namedLocations = 2
+	// Two named locations is a count, and two long paths are 160 characters. The cap has to be a
+	// width as well: `where` already counts whatever it does not name, so naming one instead of two
+	// costs a reader nothing they cannot get from the link.
+	width := tui.Columns(w)
+	if width <= 0 {
+		width = messageWidth + 6
+	}
 	for _, a := range actions {
 		band := a.priority
 		if band == "" {
@@ -1846,21 +1868,60 @@ func renderActions(w io.Writer, col tui.Painter, actions []action, compact bool)
 		if v := a.target(); v != "" {
 			title += " → " + v
 		}
-		meta := fmt.Sprintf("%s · %s", a.control, plural(a.count(), "finding"))
+		// The title has the line to itself. It is the sentence saying what to do, it is the longest
+		// thing here, and it was sharing the line with a control and a count that pushed it into an
+		// ellipsis on every action whose instruction ran past half the terminal.
+		_, _ = fmt.Fprintf(w, "  %s  %s\n",
+			col.Paint(priorityColor(a.priority), fmt.Sprintf("%-2s", band)),
+			elide(title, max(width-6, minTitleWidth)))
+		if compact {
+			continue
+		}
+
+		// Labeled and lit the way a finding's facts line is, so the two listings read alike. The
+		// count carries the accent: it is what ranks one action above another, and a line of one
+		// flat grey gives a reader nothing to find.
+		meta := []string{
+			col.Paint(cDim, "control") + " " + a.control,
+			col.Paint(tui.StyleFixed, plural(a.count(), "finding")),
+		}
 		if a.upstream {
-			meta += " · upstream"
+			meta = append(meta, col.Paint(cDim, "upstream"))
 		}
 		if a.cached {
-			meta += " · from cache"
+			meta = append(meta, col.Paint(cDim, "from cache"))
 		}
-		_, _ = fmt.Fprintf(w, "  %s  %s  %s\n",
-			col.Paint(priorityColor(a.priority), fmt.Sprintf("%-2s", band)),
-			title,
-			col.Paint(cDim, meta))
-		if detail := actionDetail(col, a, namedLocations); detail != "" && !compact {
-			_, _ = fmt.Fprintf(w, "      %s\n", col.Paint(cDim, detail))
+		// Budgeted against the whole line rather than against the detail alone. The control and the
+		// count sit in front of it now, and measuring only the tail is how a 75-finding action came
+		// to draw 137 columns.
+		room := width - 6 - metaWidth(a, len(meta))
+		named := namedLocations
+		if len(actionDetail(tui.Plain(), a, named)) > room {
+			named = 1
 		}
+		if detail := actionDetail(col, a, named); detail != "" {
+			if plain := actionDetail(tui.Plain(), a, named); len(plain) > room {
+				// One location, still too long: the path itself is the width. Cut it rather than
+				// the rule reference after it, which is the way into the findings.
+				detail = col.Paint(cDim, elide(plain, max(room, minTitleWidth)))
+			}
+			meta = append(meta, col.Paint(cDim, detail))
+		}
+		_, _ = fmt.Fprintf(w, "      %s\n", strings.Join(meta, col.Paint(cDim, " · ")))
 	}
+}
+
+// metaWidth is what an action's labeled facts occupy before the detail is added, so the detail
+// can be budgeted against what is left rather than against the whole line.
+func metaWidth(a action, parts int) int {
+	n := len("control ") + len(a.control) + len(plural(a.count(), "finding"))
+	if a.upstream {
+		n += len("upstream")
+	}
+	if a.cached {
+		n += len("from cache")
+	}
+	return n + parts*len(" · ")
 }
 
 // actionDetail is the line under an action: where it applies, and a way into the findings.
@@ -1934,57 +1995,64 @@ func elide(msg string, width int) string {
 // evidence but warnings, and removing them would change what the report means: a control that did
 // not run, a finding suppressed with nobody accepting it, and a cache hit on a mutable reference.
 func writeEvidence(w io.Writer, col tui.Painter, d Data, indent string) {
-	if lines := toolBuildLines(d.Tools); len(lines) > 0 {
-		for _, l := range lines {
-			_, _ = fmt.Fprintf(w, "%s%s\n", indent, col.Paint(cDim, l))
+	width := tui.Columns(w) - len(indent) - evidenceLabel
+	if width <= 0 {
+		width = messageWidth
+	}
+	type row struct{ label, value string }
+	var rows []row
+	add := func(label, value string) {
+		if value != "" {
+			rows = append(rows, row{label, value})
 		}
-		_, _ = fmt.Fprintln(w)
 	}
 
-	if l := runLine(d.Run.Stats); l != "" {
-		_, _ = fmt.Fprintf(w, "%s%s\n\n", indent, col.Paint(cDim, l))
-	}
-
-	if rows := repositoryRows(d.Repositories); len(rows) > 0 {
-		_, _ = fmt.Fprintf(w, "%s%s\n", indent, col.Paint(cDim, "Scanned"))
-		t := tui.NewTable(col).Indent(indent + "  ")
-		for _, r := range rows {
-			t.Row(tui.Styled(cDim, r[0]), tui.Styled(cDim, r[1]))
+	for i, l := range toolBuildLines(d.Tools) {
+		label := "scanners"
+		if i > 0 {
+			label = "unverified"
 		}
-		t.Render(w)
-		_, _ = fmt.Fprintln(w)
+		add(label, l)
 	}
-
+	add("run", runLine(d.Run.Stats))
+	for i, r := range repositoryRows(d.Repositories) {
+		label := "scanned"
+		// One label for the set. A component may hold several repositories, and repeating the word
+		// down the column would read as several different kinds of fact.
+		if i > 0 {
+			label = ""
+		}
+		add(label, strings.TrimSpace(r[0]+"  "+r[1]))
+	}
 	// What the run wrote, where the rest of what it did is. Not beside the findings: Draugr writes
 	// a report, a SARIF file and whatever else the descriptor asked for without announcing any of
-	// them, and one artifact naming itself there reads as the important one rather than as the
-	// one that happened to have a line.
-	if line := sbomLine(d.Run.SBOMs); line != "" {
-		_, _ = fmt.Fprintf(w, "%s%s\n\n", indent, col.Paint(cDim, line))
-	}
-
-	if line := exploitabilityLine(d.Exploitability); line != "" {
-		_, _ = fmt.Fprintf(w, "%s%s\n\n", indent, col.Paint(cDim, line))
-	}
-
-	var provenance []string
-	if line := descriptorLine(d.Descriptor); line != "" {
-		provenance = append(provenance, line)
-	}
-	if line := ciLine(d.CI); line != "" {
-		provenance = append(provenance, line)
-	}
-	for _, l := range provenance {
-		_, _ = fmt.Fprintf(w, "%s%s\n", indent, col.Paint(cDim, l))
-	}
-	if len(provenance) > 0 {
-		_, _ = fmt.Fprintln(w)
-	}
-
+	// them, and one artifact naming itself there reads as the important one.
+	add("sbom", sbomLine(d.Run.SBOMs))
+	add("feeds", exploitabilityLine(d.Exploitability))
+	add("descriptor", descriptorLine(d.Descriptor))
+	add("ci", ciLine(d.CI))
 	// Last, because a verdict is the thing everything above stands behind, and the gate is what
 	// turned findings into that verdict.
-	writeGate(w, col, d, true, indent)
+	add("gate", gateLine(d))
+
+	for _, r := range rows {
+		for i, part := range wrapMessage(r.value, width) {
+			label := r.label
+			if i > 0 {
+				label = ""
+			}
+			_, _ = fmt.Fprintf(w, "%s%s%s\n", indent,
+				col.Paint(cDim, tui.Pad(label, evidenceLabel)), col.Paint(cDim, part))
+		}
+	}
+	if len(rows) > 0 {
+		_, _ = fmt.Fprintln(w)
+	}
 }
+
+// evidenceLabel is how wide the label column is. Wide enough for "descriptor", which is the
+// longest of them, and fixed so every value starts at the same place.
+const evidenceLabel = 12
 
 // unscannedDetail says what a component has that nothing managed to examine.
 //
@@ -2056,6 +2124,14 @@ func writeGate(w io.Writer, col tui.Painter, d Data, full bool, indent string) {
 	_, _ = fmt.Fprintf(w, "%s%s\n\n", indent, col.Paint(style, line+"."))
 }
 
+// gateLine is the gate for the evidence block, where the label column already says "gate".
+//
+// Trimmed here rather than dropped from gateSentence, which the rendered reports share and which
+// carries the word because nothing labels it there.
+func gateLine(d Data) string {
+	return strings.TrimPrefix(gateSentence(d), "Gate: ")
+}
+
 // gateSentence is the rule a verdict was produced under, in one clause.
 //
 // One question, so one clause. The gate asks either what a scanner called the flaw or what band it
@@ -2067,7 +2143,7 @@ func writeGate(w io.Writer, col tui.Painter, d Data, full bool, indent string) {
 func gateSentence(d Data) string {
 	g := d.Gate
 	if g.Disabled {
-		return "Gate off (--no-gate) · this verdict does not decide the exit code"
+		return "off (--no-gate) · this verdict does not decide the exit code"
 	}
 	if g.Threshold == "" && len(g.PerControl) == 0 {
 		band := g.FailOnPriority
@@ -2137,7 +2213,7 @@ func descriptorLine(d *skald.DescriptorRef) string {
 			break
 		}
 	}
-	line := "Descriptor: " + root
+	line := root
 	if n := len(d.Sources) - 1; n > 0 {
 		line += fmt.Sprintf(" + %s", plural(n, "fragment"))
 	}
@@ -2165,7 +2241,7 @@ func ciLine(c *ci.Context) string {
 	if c == nil || !c.Detected() {
 		return ""
 	}
-	line := "CI: " + c.System
+	line := c.System
 	for _, part := range []string{c.Repository, jobPath(c), c.JobID()} {
 		if part != "" {
 			line += " · " + part

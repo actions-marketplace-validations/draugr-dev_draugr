@@ -150,16 +150,37 @@ type htmlUnmatched struct {
 // to change is the code. The last covers every finding that is not about a package at all, which
 // a version column left blank.
 func fixPhrase(f finding) string {
-	if f.pkg == nil || f.pkg.Name == "" {
-		return "change the code"
+	if f.pkg != nil && f.pkg.Name != "" {
+		if f.pkg.FixedVersion != "" {
+			return "upgrade to " + firstFixedVersion(f.pkg.FixedVersion)
+		}
+		if f.builtUpstream {
+			return "somebody else publishes it"
+		}
+		return "no upgrade published"
 	}
-	if f.pkg.FixedVersion != "" {
-		return "upgrade to " + f.pkg.FixedVersion
+	// Which control found it, rather than whether a package came with it. A dependency scanner
+	// that reported no package metadata has still reported a dependency, and telling somebody to
+	// change their code about a CVE in a lockfile is an instruction they cannot carry out.
+	switch f.control {
+	case "sca", "images", "licenses":
+		return "no package reported"
 	}
-	if f.builtUpstream {
-		return "somebody else publishes it"
+	return "change the code"
+}
+
+// firstFixedVersion is the release to move to, where a scanner named several.
+//
+// Trivy reports one per maintained branch, so `1.24.13, 1.25.7, 1.26.0-rc.3` is three answers to
+// "which branch are you on" rather than one instruction, and it is as long as the number of
+// branches upstream maintains. The first is the lowest release that clears the finding; the count
+// says the others exist, and the report document carries them all.
+func firstFixedVersion(fixed string) string {
+	first, rest, found := strings.Cut(fixed, ",")
+	if !found {
+		return fixed
 	}
-	return "no upgrade published"
+	return fmt.Sprintf("%s +%d", strings.TrimSpace(first), strings.Count(rest, ",")+1)
 }
 
 type htmlFinding struct {
