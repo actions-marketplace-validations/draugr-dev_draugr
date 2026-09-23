@@ -1347,34 +1347,86 @@ func toolBuildLines(tools []ToolBuild) []string {
 //
 // A table rather than a sentence each. A component may hold several repositories and a descriptor
 // may hold many components, so this is the block that grows without bound, and fifty sentences
-// each naming a URL in the middle of them cannot be compared. The host is dropped with it: every
-// row would carry the same one, and what tells them apart is the path.
+// each naming a URL in the middle of them cannot be compared.
+//
+// The host stays. It was dropped on the argument that every row carries the same one, which is
+// true of a project whose repositories all live in one place and false of the ones this block
+// exists for: a descriptor that reads from a forge and a vendor's mirror has two rows that differ
+// only there, and neither says which is which.
 func repositoryRows(repos []RepositoryProvenance) [][2]string {
 	out := make([][2]string, 0, len(repos))
 	for _, r := range repos {
-		where := r.URL
-		if short := strings.TrimPrefix(strings.TrimPrefix(where, "https://"), "http://"); short != where {
-			if _, path, ok := strings.Cut(short, "/"); ok && path != "" {
-				where = path
-			}
+		where := repositoryName(r.URL)
+		// Named, because eight characters of hex is not self-evidently anything and this block
+		// prints three different kinds of it. A reader who does not already know cannot tell a
+		// commit from the digest of a file two rows down.
+		var said string
+		if rev := r.Short(); rev != "" {
+			said = "commit " + rev
 		}
-		said := r.Short()
+		// Clauses after it, each one a fact about the scan, so the revision is always the first
+		// thing in this column and always says what it is.
+		var notes []string
 		if r.WorkingTree {
-			said = strings.TrimSpace("working tree " + said)
+			notes = append(notes, "working tree")
+		}
+		// Said rather than left to be inferred from a path that means nothing on anybody else's
+		// machine. A checkout with no remote has no portable identity, which is legitimate and is
+		// the reason this row cannot name one.
+		if localPath(r.URL) {
+			notes = append(notes, "no git remote")
 		}
 		switch {
 		case r.WorkingTree && r.Uncommitted > 0:
 			// The uncommitted work is the reason this scan was asked for, so it is included rather
 			// than missing, and the result cannot be reproduced from the revision.
-			said += fmt.Sprintf(" · %s, not reproducible", english.Count(r.Uncommitted, "uncommitted file"))
+			notes = append(notes,
+				fmt.Sprintf("%s, not reproducible", english.Count(r.Uncommitted, "uncommitted file")))
 		case r.Uncommitted > 0:
 			// A clause, not an alarm. Uncommitted work is the normal state of a checkout somebody
 			// is editing; what matters is knowing it is not in what you are reading.
-			said += fmt.Sprintf(" · %s not included", english.Count(r.Uncommitted, "uncommitted file"))
+			notes = append(notes,
+				fmt.Sprintf("%s not included", english.Count(r.Uncommitted, "uncommitted file")))
+		}
+		if len(notes) > 0 {
+			said = strings.TrimPrefix(said+" · "+strings.Join(notes, " · "), " · ")
 		}
 		out = append(out, [2]string{where, strings.TrimSpace(said)})
 	}
 	return out
+}
+
+// repositoryName renders a repository the way every other row that names one does.
+//
+// The scheme goes, because it is the transport rather than the repository, and `.git` goes with
+// it: the same repository cloned with and without the suffix is one repository, and a reader
+// comparing this against a descriptor fragment's row should not have to notice the difference.
+//
+// Rendering only. The string this trims is what a finding is identified by downstream, where two
+// spellings of one repository are already two, and normalizing it there would make every finding
+// recorded under the old spelling a different finding.
+func repositoryName(url string) string {
+	if localPath(url) {
+		return url
+	}
+	// Only the two that are noise. Every row carries one or the other and neither tells a reader
+	// anything, where any other scheme is part of what the address is: dropping it from
+	// `file:///srv/mirror` leaves a string that reads as a path on the reader's own machine.
+	for _, transport := range []string{"https://", "http://"} {
+		if rest, ok := strings.CutPrefix(url, transport); ok {
+			url = rest
+			break
+		}
+	}
+	return strings.TrimSuffix(url, ".git")
+}
+
+// localPath reports whether this is a directory on the machine that scanned rather than a
+// repository anybody else can name. It is what `Source()` falls back to when a checkout has no
+// remote to resolve.
+func localPath(url string) bool {
+	return url == "" || strings.HasPrefix(url, ".") || strings.HasPrefix(url, "/") ||
+		strings.HasPrefix(url, "~")
 }
 
 // sbomLine reports what inventory the run produced.
@@ -1725,23 +1777,25 @@ func descriptorSourceNote(src skald.DescriptorSource) string {
 	if src.Root {
 		parts = append(parts, "root")
 	}
+	// Both hashes below are named for the same reason the revision is on the row above: this block
+	// prints a commit and a content digest, they look alike, and they answer different questions.
 	if src.URL != "" {
 		// What was asked for and what it turned out to be, both: a tag is how somebody refers to a
 		// version of a shared policy, and the commit is what makes the run reproducible after the
 		// tag has moved. The file's own digest is left off here, because the commit already pins
 		// the tree it came out of and two hex strings on one row is one too many to compare.
-		where := strings.TrimPrefix(strings.TrimPrefix(src.URL, "https://"), "http://")
+		where := repositoryName(src.URL)
 		if src.Revision != "" {
 			where += "@" + src.Revision
 		}
 		parts = append(parts, where)
 		if src.Resolved != "" && src.Resolved != src.Revision {
-			parts = append(parts, shortDigest(src.Resolved))
+			parts = append(parts, "commit "+shortDigest(src.Resolved))
 		}
 		return strings.Join(parts, " · ")
 	}
 	if src.Digest != "" {
-		parts = append(parts, shortDigest(src.Digest))
+		parts = append(parts, "digest "+shortDigest(src.Digest))
 	}
 	return strings.Join(parts, " · ")
 }
