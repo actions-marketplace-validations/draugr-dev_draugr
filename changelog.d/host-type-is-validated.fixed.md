@@ -1,0 +1,1 @@
+- **`hosts[].type` is validated.** `type: apii` is refused rather than scanned with the browser checks. An editor flags a duration or an image digest in the wrong form, such as `maxAge: 1d`, as `draugr validate` does.
