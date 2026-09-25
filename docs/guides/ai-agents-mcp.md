@@ -76,7 +76,9 @@ The plugin and the binary update separately:
 | `list_controls` | Which controls exist, what each checks, which scanner backs it |
 | `get_saga_schema` | The descriptor schema **this build** enforces, for writing a Saga correctly |
 | `validate_saga` | Whether a descriptor is valid, by path or by content, and why not |
+| `propose_saga` | The descriptor `draugr init` would write for a directory, and the descriptors it already holds; writes nothing |
 | `check_tools` | Which scanners are present, what's missing, and the command that fixes it |
+| `feeds_status` | Whether each feed (KEV, EPSS, the Go vulnerability database) is cached and current, and the command that fetches any missing or stale one |
 | `summarize_report` | An existing `results.sarif`, ranked by priority, each finding carrying its remediation and what to upgrade to |
 | `fix_list` | The same report as **things to do**, most urgent first, each saying how many findings it clears and which release clears them |
 | `explain_rule` | What a rule means and how to fix it, from the report the scan already wrote |
