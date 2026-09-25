@@ -45,6 +45,30 @@ For **Claude Code**: `claude mcp add draugr -- draugr mcp`.
 The server speaks MCP on stdin/stdout, not text. Running `draugr mcp` in a terminal by hand looks
 like it has hung, it's waiting for a client.
 
+## Claude Code plugin
+
+The Draugr plugin registers the server in Claude Code from a marketplace this repository
+publishes. Run both commands inside a Claude Code session:
+
+```text
+/plugin marketplace add draugr-dev/draugr
+/plugin install draugr@draugr
+```
+
+The plugin runs `draugr mcp` from your `PATH` with the server's own defaults. It does not carry the
+binary; [install Draugr](../getting-started/install.md) before the plugin. When `draugr` is not on
+`PATH`, the session opens with a message that the server cannot start, the install command
+`curl -fsSL https://draugr.dev/install.sh | sh`, and a link to the other install methods; restart
+Claude Code after installing. With `draugr` on `PATH`, the check is silent.
+
+A server you registered yourself with `claude mcp add` that runs the same command takes precedence
+over the plugin's. Claude Code starts only that server, with any flags you gave it.
+
+The plugin and the binary update separately:
+
+- `/plugin marketplace update draugr` updates the plugin, which carries Draugr's release version.
+- `draugr self-update` updates the binary.
+
 ## What the assistant can do
 
 | Tool | What it answers |
@@ -59,7 +83,7 @@ like it has hung, it's waiting for a client.
 | `diff_reports` | What a change introduced and resolved, and whether a pull-request gate would fail |
 | `list_surveyors` | What can be discovered, and what each surveyor reads |
 | `survey` | A descriptor for a live cluster, organization or project, returned, not written |
-| `scan` | A fresh scan and its verdict, **only with `--scan=ask` or `--scan=always`** |
+| `scan` | A fresh scan and its verdict, **unless the server runs with `--scan=off`** |
 
 ## What it looks like
 
@@ -115,6 +139,37 @@ pipeline on. Saying which question it answered is what lets an assistant keep go
 the reproducible part already settled: it never re-derives your dependency CVEs, your priorities or
 your verdict, and spends its attention on the design questions no scanner computes.
 
+## Evidence
+
+Each finding from `scan`, `summarize_report` and `diff_reports` carries the evidence behind its
+rank as fields: the exploitability signal that raised it, a reachability analyzer's verdict with
+one call path, and the other scanners that reported the same flaw. A finding that a recorded
+decision took out of the ranking comes back in `accepted`, never in `findings`, with who decided,
+why, until when, and whether the analysis was this project's or a supplier's VEX statement.
+`suppressed` is the full count and `accepted` is capped at `limit`. `feeds` names the
+exploitability datasets the scan consulted, dated, and marks any older than the scan's `maxAge`.
+An empty `feeds` means no finding was checked against KEV or EPSS. `next` names the first thing to
+do.
+
+```json
+{
+  "findings": [{
+    "priority": "P1", "severity": "high", "ruleId": "CVE-2021-44228",
+    "location": "api/pom.xml:12", "action": "upgrade", "fixedVersion": "2.17.1",
+    "escalation": {"from": "high", "to": "critical", "signal": "kev",
+                   "detail": "on CISA's Known Exploited Vulnerabilities list", "asOf": "2026-09-24"},
+    "alsoFoundBy": ["grype"]
+  }],
+  "accepted": [{
+    "ruleId": "CVE-2023-0001", "severity": "medium", "location": "api/pom.xml",
+    "justification": "test scope only", "acceptedBy": "sec@example.com", "expires": "2026-12-31",
+    "origin": "saga", "source": "fragments/api.saga.yaml"
+  }],
+  "feeds": [{"signal": "epss", "asOf": "2026-09-01", "stale": true, "entries": 2, "threshold": 0.5}],
+  "next": "Start with CVE-2021-44228 in api/pom.xml:12: upgrade log4j-core to 2.17.1. Then scan again to confirm it is gone."
+}
+```
+
 ## It diagnoses; it doesn't install
 
 `check_tools` reports which external scanners are on the machine and, when something's missing,
@@ -137,6 +192,15 @@ and have already configured. Routing the same action through this server would r
 weaker path of our own making. So Draugr reports the command; you approve it where you approve
 everything else.
 
+The other commands with no tool follow the same line:
+
+| Command | Why it has no tool |
+| --- | --- |
+| `draugr tools install`, `draugr self-update` | Replace binaries on your machine |
+| `draugr feeds update` | Downloads datasets and writes them to your cache for every project on the machine |
+| `draugr config` | Holds settings and credentials shared by every project on the machine, not the one the assistant is working in |
+| `draugr classify` | Records a component's exposure and criticality, which come from how your organization runs it and cannot be read from the code |
+
 ## Draugr also offers your Saga as a resource
 
 Every `*.saga.yaml` Draugr finds nearby is exposed as an MCP resource, so the assistant can read the
@@ -144,16 +208,26 @@ descriptor without being told where it is, and so it reads the *committed* scope
 inventing one. Discovery is bounded to three directories deep and skips `node_modules`, `vendor` and
 the like; it happens at startup, so a descriptor you create afterwards needs a restart.
 
-## Scanning: off, ask, or always
+## Scanning
 
-A scan clones repositories, executes external scanners and reaches the network. That's not
-something an assistant should set off because it was curious, so you choose the terms:
+A scan clones repositories, executes external scanners and may reach beyond this machine. `--scan`
+decides whether the assistant may start one, and when you are asked first:
 
 ```bash
-draugr mcp                 # --scan=off (default): the tool isn't offered at all
-draugr mcp --scan=ask      # offered, and you approve each call
-draugr mcp --scan=always   # offered, and runs without asking
+draugr mcp                 # --scan=effects (default): asks before a scan that does more than read
+draugr mcp --scan=ask      # asks before every scan
+draugr mcp --scan=always   # never asks
+draugr mcp --scan=off      # the tool isn't offered
 ```
+
+Under `effects`, a scan asks first when either of these holds:
+
+- a planned scanner declares an [effect](../reference/saga-schema.md#configalloweffects): it probes
+  a live host, sends data to a third party, changes something, or needs elevated access
+- a publisher delivers the report off this machine. `file` writes a local directory; every other
+  kind sends the report to a service somebody else operates
+
+A scan of repositories with read-only controls and a `file` publisher runs without a prompt.
 
 The approval message describes the scan in front of you, not scanning in general. The controls that
 will run, over how many components, any scanner that does more than read, and where the results will
@@ -165,24 +239,33 @@ Draugr wants to scan app.saga.yaml.
 Controls: dast, tls, over 1 component.
 
 These do more than read:
-  nuclei (network): sends probing traffic to the declared host
+  nuclei (network): sends probe traffic to the endpoint, which is lawful only against systems you own or have written permission to test
 
-This sends traffic to a live service you have declared: nuclei. Only approve it for a host you
-are authorized to probe.
+This sends traffic to a live service you have declared: draugr-tls, nuclei. Only approve it for a host you are authorized to probe.
 
 Results will be delivered to:
   file: out/reports
+
+Repositories are checked out into a temporary directory, and external scanners run against that copy; your working tree is not modified.
 ```
 
 That distinction is the point of asking. Five read-only controls over a checkout and a `dast` run
 against a production host are different decisions, and a message that reads the same for both asks
-you to approve something it has not described. Particularly when the descriptor was written by the
+you to approve something it has not described, particularly when the descriptor was written by the
 assistant rather than by you.
 
-**`--scan=ask` is the one to want**. You approve the scan in front of you, rather than every scan
-for the session. It needs a client that implements MCP *elicitation*, and many don't yet. If yours
-can't prompt, the scan is refused with a message saying so; it never silently runs anyway. Use
-`--scan=always` for a sandbox or CI, where there's nobody to ask.
+Asking needs a client that implements MCP *elicitation*, and many don't yet. A client that can't
+prompt is refused, never run anyway, and the refusal names what the scan would have done and the
+command that runs it outside the assistant:
+
+```
+scan needs your approval, but this client can't prompt for it (no elicitation support). This scan does more than read a local copy:
+  nuclei (network): sends probe traffic to the endpoint, which is lawful only against systems you own or have written permission to test
+Run it outside the assistant with `draugr scan app.saga.yaml`.
+```
+
+Use `--scan=ask` to approve every scan whatever it does, and `--scan=always` for a sandbox or CI,
+where there's nobody to ask.
 
 The question is *returned* rather than asked mid-call: protocol version 2026-07-28 forbids a
 server prompting while it is serving a request, so the tool answers with the question and your
@@ -191,7 +274,8 @@ SDK on their behalf, so both work and neither needs anything from you. What does
 way is that a refusal, a cancellation, a client that cannot ask, or an answer Draugr cannot read
 all mean no scan.
 
-Everything else is read-only and safe to call freely. Leaving scanning off is a good default:
+Every other tool reads, and is safe to call freely.
+
 ### The scan honors your reports and publishers
 
 A scan through MCP runs the descriptor's `config.publishers` exactly as
