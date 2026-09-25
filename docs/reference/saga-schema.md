@@ -21,7 +21,7 @@ the JSON Schema Draugr publishes. See [write a Saga in your editor](../guides/ed
 
 ```yaml
 project: payments-api         # which project this describes
-release: { ... }              # required, the version being assessed
+release: { ... }              # optional, the version the reports are labeled with
 config: { ... }               # optional, controls, reports, and publishers
 components: [ ... ]           # the app's parts
 fragments: [ ... ]            # optional, merge other Saga files into this one
@@ -50,11 +50,11 @@ release:
 > value up, `project: payments-api`, and a release keeps only its version. A descriptor still
 > carrying it is refused, with that sentence.
 
-## `release` (required)
+## `release`
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `version` | ✅ | The version being assessed. What changes between builds |
+| `version` | | The version being assessed, shown on every report and appended to the VEX product identifier. Without one, a report names the project alone |
 
 ## `components`
 
@@ -1485,7 +1485,7 @@ one:
 | Unset | Falls back to | Why that is not enough |
 |-------|---------------|------------------------|
 | `author` | `project` | A project name is not a party. A consumer with a question about your claim needs somebody to ask. |
-| `product` | `pkg:generic/<project>@<release.version>` | Synthesized from your descriptor. `pkg:generic/` says so plainly. Unless a consumer happens to call your product exactly that, nothing will match. |
+| `product` | `pkg:generic/<project>@<release.version>`, without `@` where no version is given | Synthesized from your descriptor. `pkg:generic/` says so plainly. Unless a consumer happens to call your product exactly that, nothing will match. |
 
 **A document nothing matches fails silently.** A consumer cannot tell that a statement was meant for
 it, so a wrong identifier does not error. It is read, understood, and applied to nothing. This is
