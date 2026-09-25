@@ -3,7 +3,9 @@
 //
 // It is what `draugr init` reads to decide what a descriptor enables. Dependency files come from
 // internal/manifests, so the files init proposes a scanner for are the files a scan later accounts
-// for, and the two cannot disagree about what counts as one.
+// for, and the two cannot disagree about what counts as one. A go.mod is found on its own as well,
+// because the Go controls check a module that requires nothing and a scan has no packages to read
+// from it.
 package inventory
 
 import (
@@ -29,7 +31,11 @@ type Tree struct {
 	Unresolved []manifests.Unread
 	// TrivyUnread are dependency files Trivy does not read and Grype does.
 	TrivyUnread []manifests.File
-	// Go are the directories holding a go.mod that requires something.
+	// TrivyByPattern are the requirements files Trivy reads only where trivyFs.filePatterns names
+	// them: its pip analyzer opens requirements.txt and no other name.
+	TrivyByPattern []manifests.File
+	// Go are the directories holding a go.mod, whether or not it requires anything: standard-library
+	// code still has SAST findings, and still builds with a toolchain that has advisories of its own.
 	Go []string
 	// VendoredJS are JavaScript files committed as copies of a library rather than written here.
 	VendoredJS []string
@@ -43,14 +49,21 @@ type Tree struct {
 	Dockerfiles []string
 	// OpenAPI are OpenAPI and Swagger documents.
 	OpenAPI []string
-	// Parts are the directories below the root that hold their own dependency file, the units a
-	// monorepo is made of.
+	// Parts are the directories below the root that hold their own dependency file or go.mod, the
+	// units a monorepo is made of. A JavaScript workspace member, a directory the root package.json
+	// or pnpm-workspace.yaml names, is not one by its package.json alone: the lockfile at the
+	// workspace root resolves it, so it stays with that root.
 	Parts []string
 }
 
 // trivyUnread names the dependency files Trivy's filesystem scan does not parse and Grype's does.
-// Everything else manifests recognizes, Trivy reads.
+// Everything else manifests recognizes, Trivy reads, except a requirements file named anything but
+// trivyPip.
 var trivyUnread = []string{"setup.py", "pdm.lock"}
+
+// trivyPip is the one requirements file Trivy's pip analyzer opens by name. requirements-dev.txt,
+// dev-requirements.txt and requirements/test.txt are read only where a file pattern names them.
+const trivyPip = "requirements.txt"
 
 // skipDirs hold installed copies of other people's code, or tooling state. vendor/ is walked here,
 // unlike in manifests: a vendored Go module is not the project's, but a vendored jquery.js is
@@ -68,8 +81,11 @@ const headBytes = 4096
 func Read(root string) Tree {
 	t := Tree{Dependencies: manifests.Find(root)}
 	for _, f := range t.Dependencies {
-		if slices.Contains(trivyUnread, path.Base(f.Path)) {
+		switch {
+		case slices.Contains(trivyUnread, path.Base(f.Path)):
 			t.TrivyUnread = append(t.TrivyUnread, f)
+		case manifests.FormatOf(f.Path) == trivyPip && path.Base(f.Path) != trivyPip:
+			t.TrivyByPattern = append(t.TrivyByPattern, f)
 		}
 	}
 	// Accounted as though nothing had been read: what is left once NotRead is set aside is what no
@@ -80,19 +96,7 @@ func Read(root string) Tree {
 		}
 	}
 
-	parts := map[string]bool{}
-	for _, f := range t.Dependencies {
-		dir := path.Dir(f.Path)
-		if f.Ecosystem == "go" {
-			t.Go = append(t.Go, dir)
-		}
-		if dir != "." {
-			parts[dir] = true
-		}
-	}
-	t.Parts = sortedKeys(parts)
-
-	terraform, helm := map[string]bool{}, map[string]bool{}
+	terraform, helm, goMods := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	var yamls []string
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -114,6 +118,13 @@ func Read(root string) Tree {
 		rel = filepath.ToSlash(rel)
 		base := d.Name()
 		switch {
+		case base == "go.mod":
+			// Found here rather than taken from Dependencies: manifests leaves out a go.mod that
+			// requires nothing, because a scan has no packages to read from it, and the Go
+			// controls still have code to check. A vendored module's go.mod is not the project's.
+			if !slices.Contains(strings.Split(path.Dir(rel), "/"), "vendor") {
+				goMods[path.Dir(rel)] = true
+			}
 		case isDockerfile(base):
 			t.Dockerfiles = append(t.Dockerfiles, rel)
 		case base == "Chart.yaml":
@@ -131,6 +142,25 @@ func Read(root string) Tree {
 	})
 	t.Terraform = sortedKeys(terraform)
 	t.Helm = sortedKeys(helm)
+	t.Go = sortedKeys(goMods)
+
+	// A workspace member's package.json is resolved by the lockfile at the workspace root, so it
+	// makes its directory no part. A lockfile of its own, or a dependency file of another
+	// ecosystem, still does.
+	wss := workspaces(root, yamls)
+	parts := map[string]bool{}
+	for _, f := range t.Dependencies {
+		dir := path.Dir(f.Path)
+		if f.Ecosystem == "npm" && f.Kind == manifests.Declared && member(dir, wss) {
+			continue
+		}
+		parts[dir] = true
+	}
+	for _, dir := range t.Go {
+		parts[dir] = true
+	}
+	delete(parts, ".")
+	t.Parts = sortedKeys(parts)
 
 	for _, rel := range yamls {
 		head := readHead(filepath.Join(root, filepath.FromSlash(rel)))

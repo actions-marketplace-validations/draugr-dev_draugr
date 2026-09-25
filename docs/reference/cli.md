@@ -165,9 +165,10 @@ each with a comment naming the files behind it. Edit it, then `draugr scan`.
 
 | Found in the tree | Written |
 |---|---|
-| `go.mod` | `sast.gosec` · `config.reachability.analyzers: [govulncheck]` |
+| `go.mod`, including one that requires nothing | `sast.gosec` · `config.reachability.analyzers: [govulncheck]` |
 | Copied JavaScript: `*.min.js`, a file named for its release, anything under `vendor/` | `sca.retirejs` |
 | `setup.py`, `pdm.lock` | `sca.grypeFs`, since Trivy reads neither |
+| A requirements file named other than `requirements.txt`: `requirements-dev.txt`, `requirements/test.txt` | `sca.trivyFs.filePatterns` reaching it |
 | Terraform, Helm, Kubernetes, a Dockerfile | named in the `iac` comment |
 | A Dockerfile | a commented `images` control and image entry |
 | An OpenAPI or Swagger document | a commented host with `spec: path:` pointing at it |
@@ -176,9 +177,15 @@ each with a comment naming the files behind it. Edit it, then `draugr scan`.
 The console lists what was found under `FOUND` and the dependency files no scanner can take
 packages from under `UNREAD`.
 
-A directory below the root that holds its own dependency file is a part of the repository. By
-default the descriptor has one component and names the parts in a comment; `--per-directory`
-writes a component for each, scoped with `paths:`, and the root component `ignore:`s them.
+A directory below the root that holds its own dependency file or `go.mod` is a part of the
+repository. By default the descriptor has one component and names the parts in a comment;
+`--per-directory` writes a component for each, scoped with `paths:`, and the root component
+`ignore:`s them.
+
+A JavaScript workspace member stays with its workspace root, whose lockfile resolves it. A member
+is a directory the root `package.json` names under `workspaces` (npm, Yarn, Bun), as an array or as
+`packages:` in an object, or one `pnpm-workspace.yaml` names under `packages:`. A member with a
+lockfile of its own, or a dependency file of another ecosystem, is still a part.
 
 | Flag | Default | Description |
 |------|---------|-------------|
