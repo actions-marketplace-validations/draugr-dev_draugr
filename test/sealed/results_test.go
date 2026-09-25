@@ -125,16 +125,86 @@ func TestCheckTellsComponentsApart(t *testing.T) {
 	}
 }
 
+func TestCheckHoldsASecretToTheComponentsThatOwnIt(t *testing.T) {
+	// A root secret two components both name is reported once under each; a secret under one
+	// component's paths is reported under that one alone. Filing either under the wrong component
+	// must fail, and so must a second report nothing expects.
+	const reported = `{"runs":[{"results":[
+ {"ruleId":"aws-access-token","locations":[{"physicalLocation":{"artifactLocation":{"uri":"deploy.env"},"region":{"startLine":1}}}],
+  "properties":{"tool":"gitleaks","control":"secrets","component":"api"}},
+ {"ruleId":"aws-access-token","locations":[{"physicalLocation":{"artifactLocation":{"uri":"deploy.env"},"region":{"startLine":1}}}],
+  "properties":{"tool":"gitleaks","control":"secrets","component":"web"}},
+ {"ruleId":"aws-access-token","locations":[{"physicalLocation":{"artifactLocation":{"uri":"services/api/aws.env"},"region":{"startLine":1}}}],
+  "properties":{"tool":"gitleaks","control":"secrets","component":"api"}}
+]}]}`
+	got, err := Observe([]byte(reported))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exp := Expected{Secrets: []SecretExpectation{
+		{File: "deploy.env", Rules: []string{"aws-access-token"}, Components: []string{"api", "web"}},
+		{File: "services/api/aws.env", Rules: []string{"aws-access-token"}, Components: []string{"api"}},
+	}}
+	if problems, err := Check(exp, nil, got); err != nil || len(problems) != 0 {
+		t.Fatalf("a matching scan reported %v (%v)", problems, err)
+	}
+
+	exp.Secrets[1].Components = []string{"web"}
+	problems, err := Check(exp, nil, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(problems, "\n")
+	for _, want := range []string{
+		"missing (expected.yaml secrets): secrets aws-access-token at services/api/aws.env:1 in web",
+		"unexpected: secrets gitleaks aws-access-token at services/api/aws.env:1 in api",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("problems lack %q:\n%s", want, joined)
+		}
+	}
+
+	// Without components, one report from any component satisfies it, and a second is unexpected.
+	exp.Secrets = []SecretExpectation{
+		{File: "deploy.env", Rules: []string{"aws-access-token"}},
+		{File: "services/api/aws.env", Rules: []string{"aws-access-token"}},
+	}
+	problems, err = Check(exp, nil, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "unexpected: secrets gitleaks aws-access-token at deploy.env:1") {
+		t.Errorf("problems = %v, want the second report of deploy.env unexpected", problems)
+	}
+
+	// With no rules, the secret is one nothing may report: every report of it is unexpected.
+	exp.Secrets = []SecretExpectation{
+		{File: "deploy.env"},
+		{File: "services/api/aws.env", Rules: []string{"aws-access-token"}, Components: []string{"api"}},
+	}
+	problems, err = Check(exp, nil, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 2 || !strings.Contains(strings.Join(problems, "\n"), "unexpected: secrets gitleaks aws-access-token at deploy.env:1 in web") {
+		t.Errorf("problems = %v, want both reports of deploy.env unexpected", problems)
+	}
+}
+
 func TestSplitLocation(t *testing.T) {
 	for loc, want := range map[string]struct {
 		file string
 		line int
 		bad  bool
 	}{
-		"a/b.go:12": {file: "a/b.go", line: 12},
-		"a/b.js":    {file: "a/b.js"},
-		"a:0":       {bad: true},
-		"":          {bad: true},
+		"a/b.go:12":                        {file: "a/b.go", line: 12},
+		"a/b.js":                           {file: "a/b.js"},
+		"a:0":                              {bad: true},
+		"a:":                               {bad: true},
+		"":                                 {bad: true},
+		"127.0.0.1:18080/app:1.0":          {file: "127.0.0.1:18080/app:1.0"},
+		"http://127.0.0.1:18080/items?q=1": {file: "http://127.0.0.1:18080/items?q=1"},
+		"a/b.go:x":                         {bad: true},
 	} {
 		file, line, err := splitLocation(loc)
 		if (err != nil) != want.bad || file != want.file || line != want.line {
@@ -217,6 +287,24 @@ func TestInit(t *testing.T) {
 	exp.Scanners, exp.Reachability, exp.Components[1].Paths = nil, nil, nil
 	if p := CheckInit(exp, got); len(p) != 3 {
 		t.Errorf("problems = %v, want the scanners, the analyzers and the components named", p)
+	}
+
+	// An API document init found is proposed in a hosts block written commented out, as init
+	// writes it.
+	writeFixture(t, path, "project: demo\nconfig:\n  controls:\n    sca:\n      enabled: true\ncomponents:\n  - name: demo\n"+
+		"    repositories:\n      - url: .\n    # hosts:\n    #   - name: api\n    #     url: https://api.example.com\n"+
+		"    #     type: api\n    #     spec:\n    #       path: ./openapi.yaml\n")
+	got, err = ObserveInit(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exp = InitExpectation{Controls: []string{"sca"}, Specs: []string{"./openapi.yaml"}, Components: []ComponentExpectation{{Name: "demo", Repositories: []string{"."}}}}
+	if p := CheckInit(exp, got); len(p) != 0 {
+		t.Errorf("a matching descriptor reported %v", p)
+	}
+	exp.Specs = nil
+	if p := CheckInit(exp, got); len(p) != 1 || !strings.Contains(p[0], "proposes host specs") {
+		t.Errorf("problems = %v, want the spec named", p)
 	}
 
 	writeFixture(t, path, "project: [\n")

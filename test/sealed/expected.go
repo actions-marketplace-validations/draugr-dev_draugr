@@ -11,7 +11,7 @@ type Expected struct {
 	// Findings are every other result the scan must report, and together with the secrets and the
 	// fixture's inline sast annotations, every result it may report.
 	Findings []FindingExpectation `yaml:"findings"`
-	// Sealed changes what the container provides, for a scenario about a failure.
+	// Sealed changes what the container provides and how the scan runs.
 	Sealed RunOptions `yaml:"sealed"`
 	// Errors are the controls that must fail to run, each with text its error must contain. Every
 	// other control must run.
@@ -20,10 +20,18 @@ type Expected struct {
 	// scanner's option (gosec.include) or <control>.<option> for a control's own (licenses.deny).
 	// Each must be set in the scenario's descriptor, and the findings must differ because of it.
 	Proves []string `yaml:"proves"`
+	// Requests are requests the sealed server must have received by the end of the scan, each the
+	// start of a line of its log, "METHOD request-uri", for a scenario whose findings depend on
+	// something a scanner fetched from it.
+	Requests []string `yaml:"requests"`
+	// NeverRequested are line starts no request in the log may have, "DELETE " for every delete.
+	NeverRequested []string `yaml:"neverRequested"`
+	// InitScan is where a scan with the descriptor init wrote departs from Findings and Errors.
+	InitScan InitScanExpectation `yaml:"initScan"`
 }
 
-// RunOptions take something away from a sealed run, so a scenario can assert that its absence
-// is reported rather than passed.
+// RunOptions change what a sealed run provides. Most take something away, so a scenario can
+// assert that its absence is reported rather than passed.
 type RunOptions struct {
 	// WithoutTool is a program removed from PATH inside the container.
 	WithoutTool string `yaml:"withoutTool"`
@@ -34,6 +42,18 @@ type RunOptions struct {
 	// GoVulnDBAge is how long before the run the local Go vulnerability database is recorded as
 	// fetched, as a Go duration. Empty means at the start of the run.
 	GoVulnDBAge string `yaml:"goVulnDBAge"`
+	// WithoutOffline scans without --offline, for a scenario whose scanner resolves something from
+	// the sealed server, which the flag would stop it asking for. The container still has no
+	// network beyond its own loopback.
+	WithoutOffline bool `yaml:"withoutOffline"`
+}
+
+// ScanFlags are the flags a sealed scan runs with beyond its descriptor and output.
+func (o RunOptions) ScanFlags() []string {
+	if o.WithoutOffline {
+		return []string{"--log-level", "warn"}
+	}
+	return []string{"--offline", "--log-level", "warn"}
 }
 
 // ErrorExpectation is one control that must fail to run.
@@ -52,6 +72,9 @@ type InitExpectation struct {
 	Scanners []string `yaml:"scanners"`
 	// Reachability are the reachability analyzers it turns on. Empty means none.
 	Reachability []string `yaml:"reachability"`
+	// Specs are the API documents it proposes as a host's spec, in the hosts block it writes
+	// commented out. Empty means none.
+	Specs []string `yaml:"specs"`
 	// Components are the components it declares.
 	Components []ComponentExpectation `yaml:"components"`
 	// PerDirectory is what `draugr init --per-directory` writes, for a scenario whose tree has
@@ -73,8 +96,15 @@ type ComponentExpectation struct {
 type SecretExpectation struct {
 	// File is where the harness writes it, relative to the repository. It is written on line 1.
 	File string `yaml:"file"`
-	// Rules are the rules that must report it.
+	// Rules are the rules that must report it. Empty means nothing may report it, which is how a
+	// scenario writes a credential outside every component's paths and holds every component to
+	// leaving it alone.
 	Rules []string `yaml:"rules"`
+	// Components are the components that must each report it, once per rule. Empty means one
+	// report from any component, which is enough where one component scans the repository. Where
+	// several share it, a secret reported under a component whose paths do not hold it is a
+	// credential filed with a team that cannot rotate it, and only naming the owner catches that.
+	Components []string `yaml:"components,omitempty"`
 	// Removed deletes the file in a second commit, so the secret is in the repository's history
 	// and not in its tree.
 	Removed bool `yaml:"removed"`
@@ -100,8 +130,23 @@ type FindingExpectation struct {
 }
 
 // LeavesFieldsUnwritten reports whether a scan of the scenario leaves out fields the normalizers
-// clear: a control that failed to start writes no scanner version, and a scan that finds nothing
-// writes no result to take a fingerprint from.
+// clear: a control that failed to start writes no scanner version, and a scan whose results are
+// all about whole files, or that finds nothing, has no line to take a fingerprint from. Secrets
+// are written on line 1, except one found only in history, which is a result about a commit
+// rather than a line of the tree.
 func (e Expected) LeavesFieldsUnwritten() bool {
-	return len(e.Errors) > 0 || len(e.Findings)+len(e.Secrets) == 0
+	if len(e.Errors) > 0 {
+		return true
+	}
+	for _, s := range e.Secrets {
+		if !s.Removed {
+			return false
+		}
+	}
+	for _, f := range e.Findings {
+		if _, line, err := splitLocation(f.Location); err == nil && line > 0 {
+			return false
+		}
+	}
+	return true
 }
