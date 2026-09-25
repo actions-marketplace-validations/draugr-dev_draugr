@@ -41,6 +41,9 @@ func TestReadFindsWhatATreeHolds(t *testing.T) {
 
 		"ml/setup.py":         "setup(install_requires=['requests'])\n",
 		"ml/requirements.txt": "requests\n",
+		// Trivy's pip analyzer opens requirements.txt by name and no other requirements file.
+		"ml/requirements-dev.txt": "pytest==8.0.0\n",
+		"ml/dev-requirements.txt": "black==24.1.0\n",
 
 		"deploy/terraform/main.tf":                 "",
 		"deploy/terraform/.terraform/modules/m.tf": "",
@@ -73,6 +76,7 @@ func TestReadFindsWhatATreeHolds(t *testing.T) {
 		{"OpenAPI", got.OpenAPI, []string{"api/openapi.yaml", "api/v1/swagger.json"}},
 		{"Parts", got.Parts, []string{"ml", "tools", "web"}},
 		{"TrivyUnread", paths(got.TrivyUnread), []string{"ml/setup.py"}},
+		{"TrivyByPattern", paths(got.TrivyByPattern), []string{"ml/dev-requirements.txt", "ml/requirements-dev.txt"}},
 	} {
 		if !slices.Equal(c.got, c.want) {
 			t.Errorf("%s = %q, want %q", c.field, c.got, c.want)
@@ -109,6 +113,99 @@ func TestReadAMissingRoot(t *testing.T) {
 	t.Parallel()
 	if got := Read(filepath.Join(t.TempDir(), "absent")); len(got.Dependencies)+len(got.Dockerfiles) != 0 {
 		t.Errorf("a missing root reported contents: %+v", got)
+	}
+}
+
+// A go.mod that requires nothing is still a Go module: its code has SAST findings and its toolchain
+// has advisories. It is not a dependency file, so a scan never reports it unread, and a vendored
+// module's go.mod belongs to somebody else.
+func TestReadFindsAGoModuleThatRequiresNothing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, map[string]string{
+		"go.mod":                            "module shop\n\ngo 1.26\n",
+		"tools/go.mod":                      "module tools\n\ngo 1.26\n",
+		"vendor/example.com/lib/go.mod":     "module example.com/lib\n",
+		"tools/vendor/example.com/x/go.mod": "module example.com/x\n",
+	})
+
+	got := Read(root)
+
+	if want := []string{".", "tools"}; !slices.Equal(got.Go, want) {
+		t.Errorf("Go = %q, want %q", got.Go, want)
+	}
+	if want := []string{"tools"}; !slices.Equal(got.Parts, want) {
+		t.Errorf("Parts = %q, want %q", got.Parts, want)
+	}
+	if len(got.Dependencies)+len(got.Unresolved) != 0 {
+		t.Errorf("a go.mod with nothing to resolve is a dependency file: %+v %+v", got.Dependencies, got.Unresolved)
+	}
+}
+
+// A JavaScript workspace keeps one lockfile at its root for every member, so a member holding only
+// a package.json stays with the root. Three workspaces in one tree, one per way of naming members:
+// npm's array, Yarn's object with packages, and pnpm-workspace.yaml.
+func TestReadKeepsWorkspaceMembersWithTheirRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dep := `{"dependencies": {"minimist": "1.2.5"}}`
+	write(t, root, map[string]string{
+		"npm/package.json":              `{"workspaces": ["packages/*", "./tools/**", "!packages/legacy"]}`,
+		"npm/package-lock.json":         `{"lockfileVersion": 3, "packages": {"node_modules/minimist": {}}}`,
+		"npm/packages/web/package.json": dep,
+		"npm/packages/cli/package.json": dep,
+		"npm/tools/a/b/package.json":    dep,
+		// Excluded by a ! glob, and beneath a member without being one: each resolves on its own.
+		"npm/packages/legacy/package.json":      dep,
+		"npm/packages/legacy/package-lock.json": `{"lockfileVersion": 3, "packages": {"node_modules/minimist": {}}}`,
+		"npm/packages/web/nested/package.json":  dep,
+		// A member with a lockfile of its own, and one holding a dependency file of another ecosystem.
+		"npm/packages/cli/package-lock.json": `{"lockfileVersion": 3, "packages": {"node_modules/minimist": {}}}`,
+		"npm/tools/py/package.json":          dep,
+		"npm/tools/py/requirements.txt":      "flask==0.12.2\n",
+
+		"yarn/package.json":                `{"workspaces": {"packages": ["apps/*"], "nohoist": ["**/x"]}}`,
+		"yarn/yarn.lock":                   "minimist@1.2.5:\n  version \"1.2.5\"\n",
+		"yarn/apps/site/package.json":      dep,
+		"pnpm/package.json":                `{"name": "root"}`,
+		"pnpm-workspace.yaml":              "packages: [ignored]\n",
+		"pnpm/pnpm-workspace.yaml":         "packages:\n  - \"libs/**\"\n",
+		"pnpm/pnpm-lock.yaml":              "lockfileVersion: '9.0'\npackages:\n  minimist@1.2.5:\n    version: 1.2.5\n",
+		"pnpm/libs/core/util/package.json": dep,
+
+		"standalone/package.json":      dep,
+		"standalone/package-lock.json": `{"lockfileVersion": 3, "packages": {"node_modules/minimist": {}}}`,
+		"broken/package.json":          `{"workspaces": 3, "dependencies": {"minimist": "1.2.5"}}`,
+	})
+
+	got := Read(root)
+
+	want := []string{
+		"broken", "npm", "npm/packages/cli", "npm/packages/legacy", "npm/packages/web/nested", "npm/tools/py",
+		"pnpm", "standalone", "yarn",
+	}
+	if !slices.Equal(got.Parts, want) {
+		t.Errorf("Parts = %q, want %q", got.Parts, want)
+	}
+}
+
+func TestGlobMatch(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		pattern, dir string
+		want         bool
+	}{
+		{"packages/*", "packages/web", true},
+		{"packages/*", "packages/web/sub", false},
+		{"packages/**", "packages/web/sub", true},
+		{"**", "anything/at/all", true},
+		{"./apps/*/", "apps/site", true},
+		{"apps/site", "apps/site", true},
+		{"apps/[", "apps/[", false},
+	} {
+		if got := globMatch(c.pattern, c.dir); got != c.want {
+			t.Errorf("globMatch(%q, %q) = %v, want %v", c.pattern, c.dir, got, c.want)
+		}
 	}
 }
 

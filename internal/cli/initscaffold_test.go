@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -89,7 +90,7 @@ func TestInitNamesTheFilesBehindEachScanner(t *testing.T) {
 func TestInitOnAnEmptyTreeWritesTheBaseline(t *testing.T) {
 	t.Parallel()
 	got, console := runInitIn(t, map[string]string{"README.md": "shop\n"}, initOptions{})
-	for _, absent := range []string{"reachability", "retirejs", "grypeFs", "gosec", "images", "spec:", "Unread", "Directories", " · "} {
+	for _, absent := range []string{"reachability", "retirejs", "grypeFs", "trivyFs", "gosec", "images", "spec:", "Unread", "Directories", " · "} {
 		if strings.Contains(got, absent) {
 			t.Errorf("empty tree wrote %q:\n%s", absent, got)
 		}
@@ -147,6 +148,32 @@ func TestInitPerDirectoryScopesEachPart(t *testing.T) {
 	}
 }
 
+// Two npm workspaces, each with one lockfile at its root: every member stays in the component of
+// the workspace whose lockfile resolves it, rather than a component of its own with no lockfile.
+func TestInitPerDirectoryKeepsWorkspaceMembersWithTheirRoot(t *testing.T) {
+	t.Parallel()
+	lock := `{"lockfileVersion": 3, "packages": {"node_modules/minimist": {}}}`
+	dep := `{"dependencies": {"minimist": "1.2.5"}}`
+	files := map[string]string{
+		"web/package.json":               `{"workspaces": ["packages/*"]}`,
+		"web/package-lock.json":          lock,
+		"web/packages/ui/package.json":   dep,
+		"api/package.json":               `{"workspaces": {"packages": ["services/*"]}}`,
+		"api/package-lock.json":          lock,
+		"api/services/auth/package.json": dep,
+	}
+	got, _ := runInitIn(t, files, initOptions{perDirectory: true})
+	want := "components:\n" +
+		"  - name: shop\n    repositories:\n      - url: .\n        ignore: [api/, web/]\n" +
+		"    # hosts:            # for the headers/DAST controls\n" +
+		"    #   - name: api\n    #     url: https://api.example.com\n    #     type: api\n" +
+		"  - name: api\n    repositories:\n      - url: .\n        paths: [api]\n" +
+		"  - name: web\n    repositories:\n      - url: .\n        paths: [web]\n"
+	if !strings.HasSuffix(got, want) {
+		t.Errorf("components =\n%s\nwant\n%s", got[strings.Index(got, "components:"):], want)
+	}
+}
+
 // A part is named for its directory, and for its whole path where the directory name is taken,
 // by another part or by the project, so two components never share a name.
 func TestInitPerDirectoryNamesNeverCollide(t *testing.T) {
@@ -188,6 +215,108 @@ func TestInitPerDirectoryWithNoPartsSaysSo(t *testing.T) {
 	}
 	if !strings.Contains(console, "--per-directory: no directory below the root holds its own dependency file") {
 		t.Errorf("console does not say --per-directory had nothing to split:\n%s", console)
+	}
+}
+
+// Two modules that require nothing still get the Go controls, and the console names both under
+// FOUND without crediting sca, which has nothing in either to read.
+func TestInitProposesTheGoControlsForModulesThatRequireNothing(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{
+		"go.mod":        "module shop\n\ngo 1.26\n",
+		"main.go":       "package main\n",
+		"tools/go.mod":  "module tools\n\ngo 1.26\n",
+		"tools/main.go": "package main\n",
+	}
+	got, console := runInitIn(t, files, initOptions{})
+	for _, want := range []string{
+		"analyzers: [govulncheck]   # ranks a Go finding down when no code calls it · go.mod · tools/go.mod\n",
+		"gosec:\n        enabled: true     # Go-specific checks · go.mod · tools/go.mod\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("descriptor missing %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(console, "  go  go.mod · tools/go.mod  gosec · govulncheck\n") {
+		t.Errorf("console does not list the modules under FOUND:\n%s", console)
+	}
+	if strings.Contains(console, "UNREAD") {
+		t.Errorf("a go.mod with nothing to resolve is reported unread:\n%s", console)
+	}
+}
+
+// Where one module requires something and another does not, the one row names both, and sca
+// reads the one with requirements.
+func TestInitFoundRowNamesEveryGoModule(t *testing.T) {
+	t.Parallel()
+	_, console := runInitIn(t, map[string]string{
+		"go.mod":       "module shop\n\nrequire golang.org/x/text v0.3.0\n",
+		"tools/go.mod": "module tools\n\ngo 1.26\n",
+	}, initOptions{})
+	if !strings.Contains(console, "  go  go.mod · tools/go.mod  sca · gosec · govulncheck\n") {
+		t.Errorf("console does not name both modules in one row:\n%s", console)
+	}
+}
+
+// A requirements file named anything but requirements.txt is one Trivy opens only through a file
+// pattern, so init writes the pattern that reaches each way such a file is named, and names the
+// files behind it.
+func TestInitWritesFilePatternsForRequirementsTrivyDoesNotOpen(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{"named", map[string]string{"requirements-dev.txt": "flask==0.12.2\n", "requirements.txt": "click==8.0.0\n"},
+			`filePatterns: ['pip:requirements[^/]*\.txt$']   # requirements files under other names · requirements-dev.txt` + "\n"},
+		{"in a directory", map[string]string{"requirements/test.txt": "pytest==8.0.0\n"},
+			`filePatterns: ['pip:(^|/)requirements/[^/]+\.txt$']   # requirements files under other names · requirements/test.txt` + "\n"},
+		{"both", map[string]string{"api/dev-requirements.txt": "black==24.1.0\n", "web/requirements/test.txt": "pytest==8.0.0\n"},
+			`filePatterns: ['pip:requirements[^/]*\.txt$', 'pip:(^|/)requirements/[^/]+\.txt$']`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, console := runInitIn(t, c.files, initOptions{})
+			if !strings.Contains(got, "      trivyFs:\n        "+c.want) {
+				t.Errorf("descriptor missing %q:\n%s", c.want, got)
+			}
+			if !strings.Contains(console, "read by a file pattern") {
+				t.Errorf("console does not list the files under FOUND:\n%s", console)
+			}
+		})
+	}
+
+	// requirements.txt alone is what Trivy opens anyway, and needs no pattern.
+	got, _ := runInitIn(t, map[string]string{"requirements.txt": "flask==0.12.2\n"}, initOptions{})
+	if strings.Contains(got, "trivyFs") {
+		t.Errorf("init wrote a pattern for requirements.txt:\n%s", got)
+	}
+}
+
+// The patterns are Go regexes, which is what Trivy compiles them as, matched against the path
+// relative to the scan root. Each must reach every requirements file init proposes it for and
+// nothing that merely contains the word.
+func TestPipFilePatternsReachWhatInitProposesThemFor(t *testing.T) {
+	t.Parallel()
+	compile := func(p string) *regexp.Regexp {
+		return regexp.MustCompile(strings.TrimPrefix(p, "pip:"))
+	}
+	named, inDir := compile(pipNamedPattern), compile(pipDirPattern)
+	for _, rel := range []string{"requirements-dev.txt", "dev-requirements.txt", "svc/api/requirements-test.txt"} {
+		if !named.MatchString(rel) {
+			t.Errorf("%s does not reach %s", pipNamedPattern, rel)
+		}
+	}
+	for _, rel := range []string{"requirements/test.txt", "svc/requirements/dev.txt"} {
+		if !inDir.MatchString(rel) {
+			t.Errorf("%s does not reach %s", pipDirPattern, rel)
+		}
+	}
+	for _, rel := range []string{"requirements.txt.bak", "requirements/sub/dev.txt", "myrequirements/dev.txt", "notes.txt"} {
+		if named.MatchString(rel) || inDir.MatchString(rel) {
+			t.Errorf("a pattern reaches %s, which is no requirements file", rel)
+		}
 	}
 }
 
