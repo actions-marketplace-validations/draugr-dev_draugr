@@ -388,7 +388,7 @@ beyond their scanners'.
 | `grype`, `grype-fs` | `byCve`. Report under the CVE rather than the advisory ID, on by default |
 | `trivy-config` | `checks`, paths to your own Rego; `namespaces`, the namespaces they declare |
 | `semgrep` | `config`, a registry ref, path or URL |
-| `gitleaks` | `config`, a rules file shared across repositories; `history`, scan commit history too |
+| `gitleaks` | `config`, a rules file shared across repositories; `history`, scan commit history too, keeping findings whose path is inside the component's [`paths` and `ignore`](#scoping-a-repository) |
 | `virustotal` | `requestsPerMinute` |
 | `nuclei`, `draugr-headers`, `draugr-k8s-policies`, `urlhaus`, `retirejs`, `cosign`, `notation` | `enabled` only |
 
@@ -1147,6 +1147,12 @@ when the descriptor loads.
 
 **Scope is part of a target's identity.** Two components pointing at different subtrees of the
 same repository are two different scans, cached separately, and their findings stay apart.
+
+**History findings follow the same scope.** Git history cannot be checked out by subtree, so
+`gitleaks` with `history: true` walks every commit in the repository. Draugr keeps a history
+finding only when the path it names would have been checked out, by the rules above. That path is
+the one the secret had in the commit that introduced it, so the finding belongs to the component
+whose `paths` held that path.
 
 > `ignore` here is not the same tool as `config.exclude`, below. `ignore` narrows what is
 > **scanned**, the files never reach the tool, and nothing is reported about them. `exclude`
