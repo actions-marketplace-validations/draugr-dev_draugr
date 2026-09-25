@@ -344,12 +344,17 @@ back to a full scan and make the flags useless for the loop they exist for. What
 look like an unscoped run:
 
 ```
-DRAUGR  FAIL  multi 1.0.0  (scope: 1 of 3 components; sca)  1.882s
+DRAUGR  FAIL  draugr-demo 1.0  (scope: 1 of 3 components; sca)  6.243s
+
+ 4 P1 4 P2 1 P3 0 P4
+
+CONTROLS
+  sca  FAIL   4 P1 4 P2 1 P3
 
 COMPONENTS
-  app       FAIL   P1 9  P2 8  P3 1  sca
-  frontend  not scanned  (--components)
-  payments  not scanned  (--components)
+  storefront  FAIL   4 P1 4 P2 1 P3
+  api         not scanned
+  platform    not scanned
 ```
 
 Skipped components are **listed, not omitted**, a component absent from the breakdown renders
@@ -775,7 +780,9 @@ Accepting a risk is not fixing it, and the two are counted apart for that reason
 decision worth a reviewer's attention and the second is work somebody did.
 
 Everything the change touched is one table, ranked by priority, with what happened to each finding
-in its own column. Within a band, what needs somebody comes before what does not.
+in its own column. Within a band, what needs somebody comes before what does not. Above it, the
+new findings and the unchanged ones are each counted by band; the unchanged count leaves out
+findings suppressed in both scans.
 
 | Flag | Default | Description |
 |------|---------|-------------|
