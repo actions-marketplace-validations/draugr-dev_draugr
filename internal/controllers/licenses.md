@@ -3,7 +3,7 @@
 - **Industry term:** license compliance / open-source license risk
 - **Scope:** component
 - **Status:** ✅ implemented (0.43.0)
-- **Scanners:** [`trivy-license`](../scanners/trivy-license.md)
+- **Scanners:** [`trivy-license`](../scanners/trivy-license.md) (default); [`mend-licenses`](../scanners/mend-licenses.md) (opt-in)
 - **Resource:** a component's `repositories:` **and** `images:`
 
 ## What it does
@@ -42,7 +42,7 @@ walks every file rather than the dependency list.
 
 ```yaml
 config:
-  controllers:
+  controls:
     licenses:
       enabled: true
       trivyLicense:
@@ -72,7 +72,7 @@ always does.
 
 ```yaml
 config:
-  controllers:
+  controls:
     licenses:
       enabled: true
       deny: ["AGPL-3.0-only", "GPL-3.0-only"]
@@ -130,6 +130,8 @@ none of those, which is why copyleft warns rather than fails by default.
 
 ## Notes
 
+- A dependency file `trivy-license` took no packages from is listed under **Unread**, with the
+  same reasons as [`sca`](sca.md#unread). Its packages' licenses were not checked.
 - Findings are **not** legal advice. Trivy's categories are a starting point for a conversation;
   whether an obligation applies depends on whether you distribute, how you link, and which
   jurisdiction governs.

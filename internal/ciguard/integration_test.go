@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -169,5 +171,133 @@ func TestTheDecisionRunsAnythingItHasNotBeenTold(t *testing.T) {
 				t.Errorf("%v: decided %q, wanted %q", tc.changed, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestTheRaisedIssueDescribesTheSuiteItRaises. The issue opened when main goes red carries a
+// paragraph saying why the failure matters, and that paragraph is a claim about this workflow's own
+// configuration. A reader told the suite is advisory reads a red main as something to get to later,
+// and the sentence is the only thing on the page that tells them how much it matters.
+//
+// So the two claims it must not make are the two that were true before the suite became required:
+// that it can be skipped, and that a failure does not block a merge. Both are checkable against the
+// file that makes them.
+func TestTheRaisedIssueDescribesTheSuiteItRaises(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/integration.yml")
+	if err != nil {
+		t.Fatalf("read the integration workflow: %v", err)
+	}
+	body := string(raw)
+
+	for _, wrong := range []string{
+		"not a required check",
+		"does not block a merge",
+		"is skipped on a pull request",
+		"can reach main without it ever having run",
+	} {
+		if strings.Contains(body, wrong) {
+			t.Errorf("the workflow says %q, which stopped being true when the suite became required "+
+				"and unconditional; the issue it raises is where a reader learns how much a red main matters", wrong)
+		}
+	}
+}
+
+// TestAnEntryIsRefusedOnAChangeNobodyCanObserve.
+//
+// Everything else guarding the CHANGELOG guards its mechanism: one file per change so branches
+// cannot collide, no hand-editing so a section cannot land in the wrong place, released sections
+// frozen so history is not rewritten. None of them asks whether the change reaches anybody outside
+// this repository, and a fix to the text of an issue raised by our own CI carried an entry all the
+// way into published release notes, correct in form at every step.
+func TestAnEntryIsRefusedOnAChangeNobodyCanObserve(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		changed []string
+		refused bool
+	}{
+		// The one that got through, exactly as it was merged.
+		"a workflow's own prose": {
+			changed: []string{
+				".github/workflows/integration.yml",
+				"changelog.d/the-issue-raised-when-the-integration-suite-fail.fixed.md",
+				"internal/ciguard/integration_test.go",
+			},
+			refused: true,
+		},
+		"our own tooling":  {[]string{"scripts/check-slop.py", "changelog.d/a.fixed.md"}, true},
+		"tests alone":      {[]string{"pkg/report/html_test.go", "changelog.d/a.fixed.md"}, true},
+		"contributor docs": {[]string{"docs/contributing/naming.md", "changelog.d/a.fixed.md"}, true},
+
+		// Anything a user meets keeps its entry, and these are the shapes that must never be
+		// refused: suppressing a real entry ships a capability nobody is told about, which is
+		// invisible rather than noisy.
+		"a surveyor": {[]string{
+			"internal/surveyors/provenance_signers.go",
+			"docs/guides/provenance.md",
+			"changelog.d/draugr-survey-provenance.added.md",
+		}, false},
+		"a renderer":          {[]string{"pkg/report/console.go", "changelog.d/a.fixed.md"}, false},
+		"a user-facing guide": {[]string{"docs/guides/provenance.md", "changelog.d/a.fixed.md"}, false},
+		"the README":          {[]string{"README.md", "changelog.d/a.fixed.md"}, false},
+		"code beside a test":  {[]string{"pkg/saga/model.go", "pkg/saga/model_test.go", "changelog.d/a.added.md"}, false},
+		"a workflow beside code": {[]string{
+			".github/workflows/release.yml", "internal/cli/scan.go", "changelog.d/a.fixed.md",
+		}, false},
+
+		// No entry is the other failure and is not decidable here: a user-facing commit is often
+		// the second on a branch whose first one carried the entry.
+		"no entry at all": {[]string{".github/workflows/integration.yml"}, false},
+		"nothing changed": {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command("../../scripts/check-changelog-earns-it.sh")
+			cmd.Stdin = strings.NewReader(strings.Join(tc.changed, "\n") + "\n")
+			var errs bytes.Buffer
+			cmd.Stderr = &errs
+			err := cmd.Run()
+			if refused := err != nil; refused != tc.refused {
+				t.Errorf("refused = %v, want %v, for %v\n%s", refused, tc.refused, tc.changed, errs.String())
+			}
+			if tc.refused && !strings.Contains(errs.String(), "no user can observe") {
+				t.Errorf("the refusal does not say why:\n%s", errs.String())
+			}
+		})
+	}
+}
+
+// TestEveryShippedPipelineSaysWhichToolsItWants.
+//
+// `draugr tools install` with no arguments reads the descriptor in the working directory. A
+// pipeline is the one place that is the wrong answer to rely on: the checkout it runs in may hold
+// several descriptors, or none, or one it was not pointed at, and the failure arrives later as a
+// scanner that could not run.
+//
+// So every template Draugr ships says what it wants. Checked rather than remembered, because a new
+// template is written by copying an old one and the bare form is shorter.
+func TestEveryShippedPipelineSaysWhichToolsItWants(t *testing.T) {
+	t.Parallel()
+	templates := []string{"action.yml", "azure-pipelines/draugr.yml", "gitlab-ci/draugr.yml"}
+	// A line invoking the installer says which tools, by naming a descriptor, asking for the whole
+	// catalog, or listing them. Anything else is a pipeline taking whatever the directory held.
+	explicit := regexp.MustCompile(`--saga|--all|tools install (-y )?[a-z]`)
+
+	for _, path := range templates {
+		// #nosec G304 -- path comes from the hardcoded list above, inside this repository.
+		body, err := os.ReadFile(filepath.Join("../..", path))
+		if err != nil {
+			t.Errorf("%s: %v (a template that moved is one nothing checks)", path, err)
+			continue
+		}
+		for i, line := range strings.Split(string(body), "\n") {
+			if !strings.Contains(line, "tools install") || strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			if !explicit.MatchString(line) {
+				t.Errorf("%s:%d installs whatever the working directory implies:\n  %s",
+					path, i+1, strings.TrimSpace(line))
+				t.Log("  Name a descriptor with --saga, ask for everything with --all, or list the tools.")
+			}
+		}
 	}
 }

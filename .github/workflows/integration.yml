@@ -143,11 +143,17 @@ jobs:
       # A week-old copy is the right trade for this suite and not for a user: these tests point
       # Nuclei at a server they start themselves and assert which requests arrive, so they need
       # templates rather than today's templates. The stamp rolls so the set cannot drift forever.
+      #
+      # Nuclei's own config comes with it, because that is where it reads the version of the set
+      # from. Without it a restored directory reports a blank version, which Draugr treats as a set
+      # of unknown age rather than as no set, and says so on every scan.
       - name: Restore the Nuclei template set
         if: steps.needed.outputs.run == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/nuclei-templates
+          path: |
+            ~/nuclei-templates
+            ~/.config/nuclei
           key: nuclei-templates-${{ runner.os }}-${{ steps.week.outputs.stamp }}
           restore-keys: |
             nuclei-templates-${{ runner.os }}-
@@ -163,7 +169,9 @@ jobs:
         # whether they can run, and a tool only Draugr can see leaves them skipping.
         run: |
           set -euo pipefail
-          ./bin/draugr tools install -y
+          # --all rather than the default: this suite exercises every scanner, not the few
+          # a descriptor here would name.
+          ./bin/draugr tools install -y --all
           echo "$HOME/.draugr/bin" >> "$GITHUB_PATH"
 
       - name: Run integration tests
@@ -205,7 +213,7 @@ jobs:
       issues: write
     steps:
       - name: Open or update the issue
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           RESULT: ${{ needs.integration.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -245,7 +253,7 @@ jobs:
               "",
               `[The run](${process.env.RUN_URL}) has the log.`,
               "",
-              "**This suite is the only place several behaviors are checked against real tools and real registries rather than fixtures.** It is skipped on a pull request whose diff does not touch the paths it covers, so a change can reach main without it ever having run, and it is not a required check, so a failure does not block a merge either.",
+              "**This suite is the only place several behaviors are checked against real tools, real registries and a real cluster rather than against fixtures.** Every pull request runs it and it is required to pass, so main going red means something reached it that the gate on each branch did not catch: a merge race, a nightly run against an upstream image that moved, or a registry answering differently than it did an hour ago.",
               "",
               "This issue closes itself when the suite is green again.",
             ].join("\n");

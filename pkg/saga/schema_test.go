@@ -98,6 +98,8 @@ func schemaCases() []schemaCase {
 		{"vexRepository", VEXRepository{}},
 		{"exploitabilityConfig", ExploitabilityConfig{}},
 		{"reachabilityConfig", ReachabilityConfig{}},
+		{"dependencyHealthConfig", DependencyHealthConfig{}},
+		{"ciConfig", CIConfig{}},
 	}
 }
 

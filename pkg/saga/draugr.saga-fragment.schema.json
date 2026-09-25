@@ -1,6 +1,17 @@
 {
   "$comment": "A fragment adds scope or attributed suppressions and cannot change policy, which is the rule this file expresses so an editor can enforce it. Generated in full; before editing it by hand, read docs/contributing/schema.md in the draugr repository.",
   "$defs": {
+    "ciConfig": {
+      "additionalProperties": false,
+      "description": "What a run records about the CI job it ran in. A run always records who the CI system reports as having started the pipeline and who wrote the commit, as a handle and the platform's stable id; an email address is recorded only when asked for.",
+      "properties": {
+        "recordEmail": {
+          "description": "Also record the email addresses the CI system reports for those two people. Off when absent; when off, no address is read.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "component": {
       "additionalProperties": false,
       "description": "One logical part of the app. All surface lists are optional — declare what applies.",
@@ -115,6 +126,9 @@
           "type": "array",
           "uniqueItems": true
         },
+        "ci": {
+          "$ref": "#/$defs/ciConfig"
+        },
         "controllers": {
           "$ref": "#/$defs/controllers",
           "description": "Deprecated: write `controls`. Still read, so no descriptor breaks, and folded into `controls` when one loads."
@@ -122,6 +136,9 @@
         "controls": {
           "$ref": "#/$defs/controllers",
           "description": "Which controls run here, and what each is told. Named for what you meet everywhere else: `draugr controls` lists them, the catalog names them, and `config.gate.controls` already used the word. A controller is the Go type that plans the jobs."
+        },
+        "dependencyHealth": {
+          "$ref": "#/$defs/dependencyHealthConfig"
         },
         "exclude": {
           "description": "Findings to suppress, each with a stated reason. A suppressed finding is still reported — marked, with its justification — it just stops counting toward the verdict.",
@@ -274,6 +291,9 @@
           "properties": {
             "checks": {
               "description": "Paths to Rego check files, or directories of them, relative to where Draugr runs. Adds your own misconfiguration rules to Trivy's built-in ones.",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             },
             "enabled": {
@@ -282,6 +302,9 @@
             },
             "namespaces": {
               "description": "Rego namespaces to evaluate, e.g. [\"user\"]. Needed when your checks declare a namespace Trivy does not scan by default.",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             }
           },
@@ -319,6 +342,9 @@
           "properties": {
             "dbRepository": {
               "description": "OCI repositories to pull the vulnerability database from, in priority order. Point it at an internal mirror where the runner cannot reach a public registry.",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             },
             "enabled": {
@@ -331,7 +357,8 @@
                 "enum": [
                   "os",
                   "library"
-                ]
+                ],
+                "type": "string"
               },
               "type": "array"
             }
@@ -424,7 +451,8 @@
               "type": "string"
             },
             "timeout": {
-              "description": "How long to wait for the Job to finish, e.g. \"5m\". Plain seconds are accepted.",
+              "description": "How long to wait for the Job to finish, e.g. \"5m\".",
+              "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$",
               "type": "string"
             }
           },
@@ -439,6 +467,9 @@
       "properties": {
         "deny": {
           "description": "SPDX identifiers that fail the gate, e.g. [\"AGPL-3.0-only\", \"SSPL-1.0\"]. A component may add to the project's list; it cannot remove from it.",
+          "items": {
+            "type": "string"
+          },
           "type": "array"
         },
         "enabled": {
@@ -451,6 +482,9 @@
           "properties": {
             "deny": {
               "description": "SPDX identifiers that fail the gate, e.g. [\"AGPL-3.0-only\", \"SSPL-1.0\"].",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             },
             "enabled": {
@@ -462,19 +496,23 @@
               "type": "string"
             },
             "project": {
-              "description": "Mend project name to report into. Defaults to the component's name, which keeps one project per component rather than per repository.",
+              "description": "Prefix for each Mend project name, \u003cproject\u003e-\u003crepository\u003e. Each repository reports into its own project, suffixed with the paths and an 8-character hash when the component sets paths or ignore. Unset, names start at the repository.",
               "type": "string"
             },
             "resultTimeout": {
               "description": "How long to wait for Mend to finish analyzing an upload, e.g. \"15m\". Raise it for large monorepos, where the agent's upload finishes long before the analysis does.",
+              "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$",
               "type": "string"
             },
             "settings": {
-              "description": "Unified Agent configuration keys, passed through verbatim. Draugr writes the component's scope exclusions first, so anything here overrides them.",
+              "description": "Unified Agent configuration keys, passed through verbatim. The agent runs over a checkout already restricted to the component's paths and ignore.",
               "type": "object"
             },
             "warn": {
               "description": "SPDX identifiers reported as warnings rather than failures, e.g. [\"GPL-3.0-only\"].",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             }
           },
@@ -486,6 +524,9 @@
           "properties": {
             "deny": {
               "description": "SPDX identifiers that fail the gate, e.g. [\"AGPL-3.0-only\", \"SSPL-1.0\"].",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             },
             "enabled": {
@@ -498,6 +539,9 @@
             },
             "warn": {
               "description": "SPDX identifiers reported as warnings rather than failures, e.g. [\"GPL-3.0-only\"].",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             }
           },
@@ -505,6 +549,9 @@
         },
         "warn": {
           "description": "SPDX identifiers reported as a warning rather than an error, e.g. [\"MPL-2.0\"].",
+          "items": {
+            "type": "string"
+          },
           "type": "array"
         }
       },
@@ -542,6 +589,79 @@
         },
         "signers": {
           "description": "Who is expected to have signed what. A signer names itself, the images it covers, and the identity to check against.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "github": {
+                "additionalProperties": false,
+                "description": "A GitHub Actions signer written as its parts. Expands to the keyless issuer and identity, which draugr validate prints.",
+                "properties": {
+                  "ref": {
+                    "description": "The git ref the workflow ran at, e.g. \"refs/heads/main\" or \"refs/tags/v3\".",
+                    "type": "string"
+                  },
+                  "repository": {
+                    "description": "The repository whose workflow signs, as owner/name. A job calling a reusable workflow is signed as that workflow's repository, not as the caller's.",
+                    "type": "string"
+                  },
+                  "workflow": {
+                    "description": "The workflow file, e.g. \".github/workflows/release.yml\".",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "images": {
+                "description": "Image references this signer covers, where * matches any run of characters, e.g. [\"ghcr.io/acme/*\"]. An image no signer covers is observed rather than checked.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "keyless": {
+                "additionalProperties": false,
+                "description": "A Sigstore keyless signature, identified by who issued the token and which workload it named.",
+                "properties": {
+                  "identity": {
+                    "description": "The exact signing identity, e.g. \"https://github.com/acme/ci/.github/workflows/release.yml@refs/tags/v3\". A job calling a reusable workflow is signed as that workflow, not as the caller. Run the control with no signers declared and read it back from --format sarif.",
+                    "type": "string"
+                  },
+                  "identityRegexp": {
+                    "description": "A Go regular expression the identity must match, for a signer covering several workflows. A pattern loose enough to match anything accepts a signature from anybody.",
+                    "type": "string"
+                  },
+                  "issuer": {
+                    "description": "The OIDC issuer, e.g. \"https://token.actions.githubusercontent.com\" for GitHub Actions or your GitLab instance URL for GitLab CI.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "name": {
+                "description": "What to call this signer, e.g. \"our-ci\". Referenced by an image's signedBy.",
+                "type": "string"
+              },
+              "x509": {
+                "additionalProperties": false,
+                "description": "A Notary Project signature, identified by the certificate it carries and the roots that certificate must chain to. What Azure Pipelines produces with a key in Azure Key Vault, and what an in-house PKI produces.",
+                "properties": {
+                  "subject": {
+                    "description": "The certificate subject to require, as a comma-separated distinguished name, e.g. \"C=US, ST=WA, O=Acme, CN=Acme Release Signing\". Run notation inspect on the image to read the exact string.",
+                    "type": "string"
+                  },
+                  "trustStore": {
+                    "description": "Path to a PEM file of root certificates the signing certificate must chain to, relative to where Draugr runs.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
           "type": "array"
         },
         "trustRoot": {
@@ -587,14 +707,25 @@
             },
             "exclude": {
               "description": "Skip these gosec rules, by ID, e.g. [\"G104\"]. For rules that do not apply to the codebase, a finding you have judged and accepted belongs in exclusions, where it stays in the report marked suppressed.",
+              "items": {
+                "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|G[0-9]{3})$",
+                "type": "string"
+              },
               "type": "array"
             },
             "include": {
               "description": "Run only these gosec rules, by ID, e.g. [\"G101\", \"G204\"]. Everything else is skipped.",
+              "items": {
+                "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|G[0-9]{3})$",
+                "type": "string"
+              },
               "type": "array"
             },
             "tags": {
               "description": "Go build tags to compile with, e.g. [\"integration\"]. Code behind a tag gosec does not build is code it does not analyze.",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
             }
           },
@@ -654,15 +785,16 @@
               "type": "string"
             },
             "project": {
-              "description": "Mend project name to report into. Defaults to the component's name, which keeps one project per component rather than per repository.",
+              "description": "Prefix for each Mend project name, \u003cproject\u003e-\u003crepository\u003e. Each repository reports into its own project, suffixed with the paths and an 8-character hash when the component sets paths or ignore. Unset, names start at the repository.",
               "type": "string"
             },
             "resultTimeout": {
               "description": "How long to wait for Mend to finish analyzing an upload, e.g. \"15m\". Raise it for large monorepos, where the agent's upload finishes long before the analysis does.",
+              "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$",
               "type": "string"
             },
             "settings": {
-              "description": "Unified Agent configuration keys, passed through verbatim. Draugr writes the component's scope exclusions first, so anything here overrides them.",
+              "description": "Unified Agent configuration keys, passed through verbatim. The agent runs over a checkout already restricted to the component's paths and ignore.",
               "type": "object"
             }
           },
@@ -685,10 +817,39 @@
           "properties": {
             "dbRepository": {
               "description": "OCI repositories to pull the vulnerability database from, in priority order. Point it at an internal mirror where the runner cannot reach a public registry.",
+              "items": {
+                "type": "string"
+              },
               "type": "array"
+            },
+            "detectionPriority": {
+              "anyOf": [
+                {
+                  "const": "precise",
+                  "description": "Pinned versions only. The default."
+                },
+                {
+                  "const": "comprehensive",
+                  "description": "Also a range such as \u003e=1.2 in requirements.txt, read as its minimum version, and Go standard-library vulnerabilities."
+                }
+              ],
+              "description": "How Trivy decides which version of a dependency is installed.",
+              "type": "string"
             },
             "enabled": {
               "description": "Run this scanner. It is a default for this control, so it runs unless set to false.",
+              "type": "boolean"
+            },
+            "filePatterns": {
+              "description": "More files for an analyzer to read, each analyzer:regex, e.g. [\"pip:requirements-.*\\\\.txt\"]. Trivy's pip analyzer reads only requirements.txt.",
+              "items": {
+                "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|[a-z0-9-]+:.+)$",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "includeDevDeps": {
+              "description": "Report development dependencies too. Trivy leaves them out by default. Applies to npm, Yarn and Gradle.",
               "type": "boolean"
             },
             "pkgTypes": {
@@ -697,7 +858,8 @@
                 "enum": [
                   "os",
                   "library"
-                ]
+                ],
+                "type": "string"
               },
               "type": "array"
             }
@@ -865,6 +1027,17 @@
       "description": "Business impact if this component fails — the impact axis of risk prioritization.",
       "type": "string"
     },
+    "dependencyHealthConfig": {
+      "additionalProperties": false,
+      "description": "Rank a finding up when the dependency it is in has been deprecated by its publisher or flagged as malicious. Beside `exploitability` and `reachability` because all three decide how findings are ranked. Only statements by somebody who can be named move a finding; health scores are read as context and never change a band, and this never gates on its own.",
+      "properties": {
+        "enabled": {
+          "description": "Turn the signal on. Off when absent. A field rather than the block's presence, because a scan with this on sends the list of packages it found to deps.dev, and writing the block to see what it does should not be the same act as agreeing to that.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "excludeRule": {
       "additionalProperties": false,
       "description": "One exclusion. Set paths, rules, or both; when both are set a finding must match both.",
@@ -876,7 +1049,7 @@
         },
         "expires": {
           "description": "Date this exclusion stops applying (YYYY-MM-DD). Past it the finding returns and the report says the exclusion lapsed.",
-          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|\\d{4}-\\d{2}-\\d{2})$",
           "type": "string"
         },
         "paths": {
@@ -938,11 +1111,12 @@
           "type": "string"
         },
         "maxAge": {
-          "description": "How old a cached feed may be before \"auto\" refetches it and a scan warns that it is stale. A Go duration; defaults to 24h, tracking EPSS being republished daily. Raise it on a runner deliberately pinned to a known copy of the data.",
+          "description": "How old a cached feed may be before \"auto\" refetches it and a scan warns that it is stale. It is also the age at which govulncheck stops reading the local Go vulnerability database. A Go duration; defaults to 24h, tracking EPSS being republished daily. Raise it on a runner deliberately pinned to a known copy of the data.",
           "examples": [
             "24h",
             "168h"
           ],
+          "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$",
           "type": "string"
         }
       },
@@ -997,6 +1171,79 @@
           "properties": {
             "signers": {
               "description": "Who is expected to have signed what. A signer names itself, the images it covers, and the identity to check against.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "github": {
+                    "additionalProperties": false,
+                    "description": "A GitHub Actions signer written as its parts. Expands to the keyless issuer and identity, which draugr validate prints.",
+                    "properties": {
+                      "ref": {
+                        "description": "The git ref the workflow ran at, e.g. \"refs/heads/main\" or \"refs/tags/v3\".",
+                        "type": "string"
+                      },
+                      "repository": {
+                        "description": "The repository whose workflow signs, as owner/name. A job calling a reusable workflow is signed as that workflow's repository, not as the caller's.",
+                        "type": "string"
+                      },
+                      "workflow": {
+                        "description": "The workflow file, e.g. \".github/workflows/release.yml\".",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "images": {
+                    "description": "Image references this signer covers, where * matches any run of characters, e.g. [\"ghcr.io/acme/*\"]. An image no signer covers is observed rather than checked.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "keyless": {
+                    "additionalProperties": false,
+                    "description": "A Sigstore keyless signature, identified by who issued the token and which workload it named.",
+                    "properties": {
+                      "identity": {
+                        "description": "The exact signing identity, e.g. \"https://github.com/acme/ci/.github/workflows/release.yml@refs/tags/v3\". A job calling a reusable workflow is signed as that workflow, not as the caller. Run the control with no signers declared and read it back from --format sarif.",
+                        "type": "string"
+                      },
+                      "identityRegexp": {
+                        "description": "A Go regular expression the identity must match, for a signer covering several workflows. A pattern loose enough to match anything accepts a signature from anybody.",
+                        "type": "string"
+                      },
+                      "issuer": {
+                        "description": "The OIDC issuer, e.g. \"https://token.actions.githubusercontent.com\" for GitHub Actions or your GitLab instance URL for GitLab CI.",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "name": {
+                    "description": "What to call this signer, e.g. \"our-ci\". Referenced by an image's signedBy.",
+                    "type": "string"
+                  },
+                  "x509": {
+                    "additionalProperties": false,
+                    "description": "A Notary Project signature, identified by the certificate it carries and the roots that certificate must chain to. What Azure Pipelines produces with a key in Azure Key Vault, and what an in-house PKI produces.",
+                    "properties": {
+                      "subject": {
+                        "description": "The certificate subject to require, as a comma-separated distinguished name, e.g. \"C=US, ST=WA, O=Acme, CN=Acme Release Signing\". Run notation inspect on the image to read the exact string.",
+                        "type": "string"
+                      },
+                      "trustStore": {
+                        "description": "Path to a PEM file of root certificates the signing certificate must chain to, relative to where Draugr runs.",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              },
               "type": "array"
             }
           },
@@ -1273,6 +1520,7 @@
         },
         "digest": {
           "description": "Pin the immutable content digest, e.g. sha256:…",
+          "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|[a-z0-9]+:[a-f0-9]+)$",
           "type": "string"
         },
         "image": {
@@ -1459,16 +1707,13 @@
     },
     "release": {
       "additionalProperties": false,
-      "description": "Identifies what is being assessed.",
+      "description": "Identifies what is being assessed. Optional; its version labels the reports.",
       "properties": {
         "version": {
-          "description": "Release version. Supports ${{ ENV_VAR }} substitution.",
+          "description": "Release version, shown on every report and appended to the VEX product identifier. Supports ${{ ENV_VAR }} substitution.",
           "type": "string"
         }
       },
-      "required": [
-        "version"
-      ],
       "type": "object"
     },
     "reportConfig": {
@@ -1594,7 +1839,7 @@
           "type": "array"
         },
         "paths": {
-          "description": "Restrict the scan to these directories. Files at the repository root are always included — manifests and scanner configuration live there.",
+          "description": "Restrict the scan to these directories and files. A root file is scanned only when an entry names it; the scanners' configuration at the root (.trivyignore, .semgrepignore, .gitleaks.toml and similar) is always kept. An entry the repository does not hold is an error.",
           "items": {
             "minLength": 1,
             "type": "string"
@@ -1779,6 +2024,7 @@
           "description": "A document to fetch over HTTPS. Fetched once per run and cached; the report records the URL, when it was fetched and the digest of what came back.",
           "format": "uri",
           "minLength": 1,
+          "pattern": "^(.*\\$\\{\\{.*\\}\\}.*|https?://.+)$",
           "type": "string"
         }
       },

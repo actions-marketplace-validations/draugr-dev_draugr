@@ -21,7 +21,7 @@ the JSON Schema Draugr publishes. See [write a Saga in your editor](../guides/ed
 
 ```yaml
 project: payments-api         # which project this describes
-release: { ... }              # required, the version being assessed
+release: { ... }              # optional, the version the reports are labeled with
 config: { ... }               # optional, controls, reports, and publishers
 components: [ ... ]           # the app's parts
 fragments: [ ... ]            # optional, merge other Saga files into this one
@@ -50,11 +50,11 @@ release:
 > value up, `project: payments-api`, and a release keeps only its version. A descriptor still
 > carrying it is refused, with that sentence.
 
-## `release` (required)
+## `release`
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `version` | ✅ | The version being assessed. What changes between builds |
+| `version` | | The version being assessed, shown on every report and appended to the VEX product identifier. Without one, a report names the project alone |
 
 ## `components`
 
@@ -225,6 +225,9 @@ components:
       data-class: pii
 ```
 
+A label's value is a string. YAML reads `tier: 1` as a number and `pci: true` as a boolean, so
+quote such values, `tier: "1"`; `draugr validate` names each one it refuses.
+
 They never reach a verdict. What they do is answer *whose*, in the two places that question is
 asked. `draugr scan --labels team=web` runs only what that team owns, which is how a pipeline in a
 repository holding many teams' code stays about one of them. And every finding carries its
@@ -239,9 +242,9 @@ question asked where there is a fleet.
 
 A map of control name → free-form settings. A control runs only when **enabled**:
 
-> Written `controllers:` until recently. That spelling still loads and is folded into `controls`
-> when a descriptor is read, so nothing breaks; `controls` is what to write now, and what every
-> other surface has always said. `draugr controls` lists them, the catalog names them, and
+> `controllers:` is the older spelling. It still loads and is folded into `controls` when a
+> descriptor is read, so nothing breaks; `controls` is what to write, and what every other surface
+> says. `draugr controls` lists them, the catalog names them, and
 > `config.gate.controls` used the word already. A *controller* is the Go type that plans the jobs.
 
 ```yaml
@@ -377,17 +380,17 @@ beyond their scanners'.
 | `mend-licenses` | the `mend-sca` options, plus `deny` and `warn` |
 | `kube-bench-job` | `targets`, `benchmark`, `namespace`, `image`, `nodeSelector`, `timeout`, `context` |
 | `kube-bench` | `targets`, `benchmark`, `version`, `context`, `configDir` |
-| `trivy-license` | `deny`, `warn`, SPDX identifiers |
+| `trivy-license` | `deny`, `warn`, SPDX identifiers; `full`, read `LICENSE` files and source headers too |
 | `draugr-tls` | `expiryErrorDays`, `expiryWarnDays` |
 | `gosec` | `include`, `exclude`, rule IDs; `tags`, Go build tags |
 | `trivy`, `trivy-fs` | `pkgTypes` (`os`, `library`), `dbRepository`, an internal mirror |
+| `trivy-fs` | `filePatterns` (`analyzer:regex`), `includeDevDeps`, `detectionPriority` (`precise`, `comprehensive`) |
 | `grype`, `grype-fs` | `byCve`. Report under the CVE rather than the advisory ID, on by default |
-| `retirejs` | `enabled` only |
 | `trivy-config` | `checks`, paths to your own Rego; `namespaces`, the namespaces they declare |
 | `semgrep` | `config`, a registry ref, path or URL |
 | `gitleaks` | `config`, a rules file shared across repositories; `history`, scan commit history too |
 | `virustotal` | `requestsPerMinute` |
-| `nuclei`, `draugr-headers`, `draugr-k8s-policies`, `urlhaus` | `enabled` only |
+| `nuclei`, `draugr-headers`, `draugr-k8s-policies`, `urlhaus`, `retirejs`, `cosign`, `notation` | `enabled` only |
 
 
 [`examples/scanner-options.saga.yaml`](../../examples/scanner-options.saga.yaml) writes every
@@ -459,6 +462,76 @@ counts all three so you can see how much of the answer is missing.
 The call path is in the SARIF and in `report.json`, ordered from your own code to the vulnerable
 symbol. **Go only**, a reachability claim without its language is an overclaim.
 
+
+### Dependency health (`config.dependencyHealth`)
+
+A CVE in a package whose publisher has walked away is a different problem from the same CVE in one
+that ships a fix next week, and no scanner reports the difference because it is not in the code.
+
+```yaml
+config:
+  dependencyHealth:
+    enabled: true
+```
+
+Off unless you switch it on. Unlike the other two enrichments, which read a local cache somebody
+chose to fill, this one reaches [deps.dev](https://deps.dev) during the scan and sends it the list
+of packages the run found. Nothing else leaves the machine: no source, no findings, no descriptor.
+
+**Two statements move a finding, and both name who made them.**
+
+| Signal | What it means | What it does |
+|---|---|---|
+| Malicious | the package is in the [OSSF Malicious Packages Project](https://github.com/ossf/malicious-packages) | ranks it critical |
+| Deprecated | the publisher marked this version as no longer supported | ranks it one band higher |
+
+Everything else the service reports is read and deliberately ignored. A newer version existing is
+true of nearly every dependency, and a vulnerability it knows about is one your scanners already
+found, so acting on either would count one problem twice or rank on nothing.
+
+**Health scores never move a band.** Not a simplification, a finding: reported vulnerability counts
+*rise* with OpenSSF Scorecard's aggregate score rather than falling, at an R² of 9% to 12%, and
+Scorecard's `Maintained` check scores PyYAML zero because it reads a 90-day activity window and
+PyYAML is stable rather than abandoned. Ranking a CVE up because a maintainer commits rarely would
+be wrong in a way the people who depend on that package would notice first.
+
+**It never gates on its own.** A dependency choice is not a defect, and a build that failed because
+a maintainer walked away is one people learn to route around.
+
+In the report, beside the other signals:
+
+```console
+P1  critical  NSWG-ECO-328 · Cross-Site Scripting (XSS)
+    ↑ deprecated · component web · scanner trivy · fix upgrade to >=3.0.0
+    web/package-lock.json:10
+```
+
+The publisher's own words travel in `report.json` and the SARIF, where there is room for a sentence.
+
+**What it covers.** The language ecosystems deps.dev indexes: Cargo, Go, Maven, npm, NuGet, PyPI and
+RubyGems. Operating-system packages from a container image are not among them, so on an image-heavy
+project this speaks to the dependencies you chose rather than to the base you built on.
+
+**What it costs.** One request per hundred packages, cached for an hour. The hour is the API's own
+`max-age`, so it is a term rather than a setting, and it is why this signal has no offline path: a
+run with no network reports that it could not consult the data and ranks without it.
+
+
+### CI (`config.ci`)
+
+A run records who its CI system reports as having started the pipeline and who wrote the commit, as
+a handle and the platform's stable id (see [the report's `ci` block](../guides/reports-and-publishers.md)).
+Email addresses are personal data, so they are recorded only when asked for:
+
+```yaml
+config:
+  ci:
+    recordEmail: true
+```
+
+When off, no address is read. When on, a run records the addresses GitLab, Azure Pipelines and
+Buildkite report for those two people, and on GitHub the commit author's address from the push event.
+GitHub reports no address for whoever started the run.
 
 ### Running two scanners on one control
 
@@ -571,8 +644,6 @@ Built-in publishers: **`file`** and **`github`** (uploads the `sarif` report to 
 
 ```yaml
 config:
-  reports:
-    - format: sarif
   publishers:
     - kind: github         # repo/commit/ref default to the GitHub Actions env
       # repo: owner/name   # optional overrides ($GITHUB_REPOSITORY / $GITHUB_SHA / $GITHUB_REF)
@@ -626,17 +697,13 @@ publishers](../guides/reports-and-publishers.md#the-three-calls) so anything els
 
 ```yaml
 config:
-  reports:
-    - format: json      # the run
-    - format: sarif     # its evidence
   publishers:
     - kind: draugr-api
       # url: https://draugr.acme.example   # or $DRAUGR_API_URL
 ```
 
-Both formats are required and the publisher says which is missing, because they are separate
-mistakes with separate fixes. The token comes from `$DRAUGR_API_TOKEN` (or `tokenEnv`) and never
-from the descriptor, which is a file people commit.
+It renders the run report and its evidence for itself. The token comes from `$DRAUGR_API_TOKEN` (or
+`tokenEnv`) and never from the descriptor, which is a file people commit.
 
 **Where a setting comes from, least specific first:**
 
@@ -946,11 +1013,11 @@ else can check out and reproduce, and "whatever was on one machine at one moment
 **So the report names it**, along with what it left out:
 
 ```
-Scanned: https://github.com/acme/web.git at 3f9a1c2b (3 uncommitted files not included)
+Scanned: https://github.com/acme/web at 3f9a1c2b (3 uncommitted files not included)
 ```
 
-**A repository is named by the repository, not by how you reached it.** Two details follow, and
-both exist so that one repository reads as one thing however it was scanned.
+**A repository is named by the repository, not by how you reached it.** Three details follow, and
+all three exist so that one repository reads as one thing however it was scanned.
 
 *A local checkout is reported as the repository it was cloned from.* Point a descriptor at `.` or
 `/srv/web` and the report names its git remote, because the path is where the code sits on one
@@ -960,9 +1027,27 @@ entry, and `draugr diff` can compare them. A checkout with **no** remote keeps i
 then the only name it has and the one you can act on.
 
 *Credentials and usernames are dropped.* `https://oauth2:TOKEN@github.com/acme/web.git` is reported,
-cached and named as `https://github.com/acme/web.git`, and Azure DevOps URLs stop carrying the
+cached and named as `https://github.com/acme/web`, and Azure DevOps URLs stop carrying the
 organization as a username as well as in the path. The URL used to **clone** keeps everything it
 had. Fetching is the one thing credentials are for.
+
+*Every spelling is one name.* A repository is reported as `https://host/path`, whichever way the
+descriptor or the remote wrote it:
+
+| written | reported as |
+|---|---|
+| `https://github.com/acme/web.git` | `https://github.com/acme/web` |
+| `git@github.com:acme/web.git` | `https://github.com/acme/web` |
+| `ssh://git@github.com:22/acme/web` | `https://github.com/acme/web` |
+| `git@ssh.dev.azure.com:v3/acme/platform/web` | `https://dev.azure.com/acme/platform/_git/web` |
+| `https://acme.visualstudio.com/platform/_git/web` | `https://dev.azure.com/acme/platform/_git/web` |
+
+The host is lowercased and the path is not, because some forges treat a path's case as meaningful.
+A port stays where it is part of the address, `https://ghe.internal:8443/…`, and goes where it
+belongs to SSH. A local path with no remote, and a `file://` URL, are reported as written.
+
+`draugr diff` compares by the same name, so a baseline from before this rule still matches a scan
+made after it.
 
 That line is in the console report, the Markdown and HTML ones, and the JSON under `repositories`.
 It is per repository and per revision rather than per control: several controls scanning one
@@ -1030,15 +1115,27 @@ repositories:
       - vendor/
 ```
 
-**`paths` selects directories.** `services/web` and `services/web/**` mean the same thing; a
-trailing `/**` is accepted because it reads naturally. Draugr checks out only those directories, so
-a large repository is also cheaper to scan. The rest is never fetched.
+**`paths` selects directories and files.** `services/web` and `services/web/**` mean the same
+subtree; a trailing `/**` is accepted because it reads naturally. `go.mod` means that one file.
+Draugr checks out only what `paths` names, so a large repository is also cheaper to scan. The rest
+is never fetched.
 
-**Files at the repository root are always included**, whatever `paths` says. `go.mod`,
-`package.json`, `Dockerfile`, `.trivyignore`, `.semgrepignore` and their kin live there, and they
-are how a scanner knows what it is looking at. A tool that cannot find the manifest does not fail.
-It reports fewer findings against a tree it did not understand, and that is indistinguishable from a
-clean scan.
+**A file at the repository root is scanned only when `paths` names it.** A root lockfile, `go.mod`
+or `Dockerfile` belongs to the component that lists it, so two components sharing a repository do
+not each report the findings in it. A component built from the root module or workspace names the
+files it builds from:
+
+```yaml
+paths: [services/web, go.mod, go.sum]
+```
+
+A workspace member whose lockfile sits at the root and is not named appears under **Unread** with
+`no lockfile`, so a missing entry shows in the report. The scanners' configuration at the root is
+kept for every component whatever `paths` says: `.trivyignore`, `.trivyignore.yaml`, `trivy.yaml`,
+`.semgrepignore`, `.gitleaks.toml`, `.gitleaksignore` and `.grype.yaml`.
+
+**An entry the repository does not hold is an error**, naming the entry, at the revision being
+scanned.
 
 **`ignore` removes paths, and runs last**, so it can carve out of a subtree `paths` selected. The
 patterns are gitignore-shaped: a trailing `/` matches a directory and everything beneath it, `*`
@@ -1157,6 +1254,24 @@ ACCEPTED
   config.exclude  5 findings suppressed · 3 accepted by you@example.com, 2 unattributed
 ```
 
+**Attribution.** A suppression from one of these rules carries `origin: saga`, whether or not the
+rule named anybody, so a reader knows to go and read the descriptor. A report uses four values:
+
+| `origin` | what set the finding aside | who to ask |
+|---|---|---|
+| `saga` | a rule in this descriptor | whoever owns the descriptor |
+| `vex` | a claim [imported from a supplier's document](#reading-a-suppliers-vex-componentsvex-configvexsources) | the supplier |
+| `tool` | a directive in the scanned file, a `#nosec` or a `# nosemgrep` | whoever committed the line |
+| `scanner` | the scanner's own configuration, a `.trivyignore` line | whoever owns that file |
+
+Draugr writes the first two and reads the other two from what the scanner reported, using SARIF's
+own `kind`. It records which party made the claim and does not check the claim: nothing here opens
+the supplier's document or reads the comment, so the origin says who to ask and never that the
+answer is right.
+
+Neither of the scanner's own is a decision this project recorded. They are listed and counted
+under `scanner exclusions`, never under `config.exclude`.
+
 ### Declaring what a suppression means in VEX
 
 `reason` is prose for whoever reviews the descriptor. A [VEX](../guides/vex.md) status is a
@@ -1256,7 +1371,7 @@ end of them and one total could only support the weakest:
 ACCEPTED
   config.exclude     5 findings suppressed
   VEX                1 finding excused
-  source directives  2 findings silenced, and nobody signed them
+  scanner exclusions 2 findings suppressed
 ```
 
 Who accepted each one is asked of the evidence rather than of a scan somebody is reading to find
@@ -1266,13 +1381,22 @@ out what to fix, so `--evidence` adds it:
 ACCEPTED
   config.exclude     5 findings suppressed · 3 accepted by you@example.com, 2 unattributed
   VEX                1 finding excused · 1 asserted by ACME Security <sec@acme.example>
-  source directives  2 findings silenced, and nobody signed them
+  scanner exclusions 2 findings suppressed
 ```
 
-The last is a `# nosemgrep`, a linter pragma, or anything else a scanner honors from a comment in
-the file. It is the weakest of the three. Written by whoever was editing, reviewed by nobody in
-particular, which is exactly why it is printed rather than folded into a total with decisions
-somebody signed.
+**`scanner exclusions` is every finding a scanner set aside on its own**, with nothing in this
+descriptor asking it to: a `# nosemgrep` or a `#nosec` beside the line, or a rule in a file the
+scanner reads such as `.trivyignore`. Draugr reports them rather than letting them disappear,
+because a finding somebody excluded and a finding nobody ever had look identical once the scanner
+has dropped it.
+
+It is the weakest of the three, and that is why it is a row of its own rather than part of a total.
+Both kinds were written outside the descriptor, neither carries an author or a date, and neither
+went past a reviewer. A single count would let that hide inside the two that did.
+
+Which of the two a finding is stays on the finding, as `origin: tool` or `origin: scanner`, because
+they send you to different people: whoever committed the line, or whoever owns the file of
+exclusions. `--evidence` names the files.
 
 **When both `paths` and `rules` are set, a finding must match both.** That's the narrow reading,
 "this rule, in this place", and the safe one: the alternative would quietly widen *ignore the
@@ -1305,7 +1429,7 @@ config:
 | `kev` | CISA's Known Exploited Vulnerabilities catalog. A CVE on it becomes **critical**, whatever it was. |
 | `epss` | FIRST's EPSS scores. A CVE at or above `epssThreshold` is raised **one band**. |
 | `epssThreshold` | The EPSS probability (0–1) that triggers the bump. Zero disables it while leaving KEV in force. |
-| `maxAge` | How old a cached feed may be before `auto` refetches it and a scan warns. A Go duration. |
+| `maxAge` | How old a cached feed may be before `auto` refetches it and a scan warns, and before govulncheck stops reading the local Go vulnerability database. A Go duration. |
 
 KEV wins where both apply: observed exploitation outranks a prediction about it. Either signal works
 without the other. Set one key and omit the other.
@@ -1372,7 +1496,7 @@ one:
 | Unset | Falls back to | Why that is not enough |
 |-------|---------------|------------------------|
 | `author` | `project` | A project name is not a party. A consumer with a question about your claim needs somebody to ask. |
-| `product` | `pkg:generic/<project>@<release.version>` | Synthesized from your descriptor. `pkg:generic/` says so plainly. Unless a consumer happens to call your product exactly that, nothing will match. |
+| `product` | `pkg:generic/<project>@<release.version>`, without `@` where no version is given | Synthesized from your descriptor. `pkg:generic/` says so plainly. Unless a consumer happens to call your product exactly that, nothing will match. |
 
 **A document nothing matches fails silently.** A consumer cannot tell that a statement was meant for
 it, so a wrong identifier does not error. It is read, understood, and applied to nothing. This is

@@ -13,6 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/draugr-dev/draugr/internal/english"
+	"github.com/draugr-dev/draugr/internal/sagatest"
 	"github.com/draugr-dev/draugr/pkg/plugin"
 	"github.com/draugr-dev/draugr/pkg/saga"
 	"github.com/draugr-dev/draugr/pkg/surveyor"
@@ -66,6 +68,7 @@ func TestRunSurveyToStdout(t *testing.T) {
 		t.Errorf("expected discovered component in output:\n%s", out)
 	}
 	// Output must be a loadable Saga.
+	sagatest.EditorAccepts(t, buf.Bytes(), false)
 	if _, err := saga.Load(buf.Bytes()); err != nil {
 		t.Errorf("survey output is not a valid Saga: %v", err)
 	}
@@ -345,6 +348,7 @@ func TestSurveyOutputIsScannable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sagatest.EditorAccepts(t, buf.Bytes(), false)
 	m, err := saga.Load(buf.Bytes())
 	if err != nil {
 		t.Fatalf("survey output is not a valid Saga: %v", err)
@@ -390,11 +394,11 @@ func TestSurveySummaryCallsOutADescriptorThatScansNothing(t *testing.T) {
 
 func TestPluralHandlesTheNounsWeUse(t *testing.T) {
 	cases := map[string]string{
-		"1 component":    plural(1, "component"),
-		"2 components":   plural(2, "component"),
-		"1 repository":   plural(1, "repository"),
-		"3 repositories": plural(3, "repository"),
-		"0 hosts":        plural(0, "host"),
+		"1 component":    english.Count(1, "component"),
+		"2 components":   english.Count(2, "component"),
+		"1 repository":   english.Count(1, "repository"),
+		"3 repositories": english.Count(3, "repository"),
+		"0 hosts":        english.Count(0, "host"),
 	}
 	for want, got := range cases {
 		if got != want {
@@ -417,8 +421,8 @@ func TestPlural(t *testing.T) {
 		{0, "tool", "0 tools"},
 	}
 	for _, c := range cases {
-		if got := plural(c.n, c.noun); got != c.want {
-			t.Errorf("plural(%d, %q) = %q, want %q", c.n, c.noun, got, c.want)
+		if got := english.Count(c.n, c.noun); got != c.want {
+			t.Errorf("english.Count(%d, %q) = %q, want %q", c.n, c.noun, got, c.want)
 		}
 	}
 }
@@ -742,6 +746,7 @@ func TestSurveyFragmentWritesComponentsAndNothingElse(t *testing.T) {
 		t.Errorf("the surveyed component is missing:\n%s", got)
 	}
 	// And it has to be readable as what it claims to be.
+	sagatest.EditorAccepts(t, data, true)
 	parsed, err := saga.LoadFragment(data, out)
 	if err != nil {
 		t.Fatalf("the fragment it wrote does not load: %v\n%s", err, got)
@@ -770,6 +775,7 @@ func TestSurveyFragmentAddsToWhatIsAlreadyThere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sagatest.EditorAccepts(t, data, true)
 	parsed, err := saga.LoadFragment(data, out)
 	if err != nil {
 		t.Fatal(err)

@@ -94,6 +94,20 @@ func MergeFragments(frags ...saga.Fragment) saga.Fragment {
 				out.ExposureReasons[name] = reason
 			}
 		}
+		for name, reason := range frag.SignerReasons {
+			if out.SignerReasons == nil {
+				out.SignerReasons = map[string]string{}
+			}
+			if _, seen := out.SignerReasons[name]; !seen {
+				out.SignerReasons[name] = reason
+			}
+		}
+		// The settings a fragment is allowed to carry, appended the way a fragment read from a
+		// file is. Dropped here, a surveyor could propose one and the merge would discard it
+		// without saying so, which is the shape of a survey that reports success and writes
+		// nothing.
+		saga.AppendFragmentControls(&out.Config, frag.Config.Controls)
+		out.Config.Exclude = append(out.Config.Exclude, frag.Config.Exclude...)
 	}
 	return out
 }

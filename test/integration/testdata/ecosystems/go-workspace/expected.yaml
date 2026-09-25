@@ -1,0 +1,39 @@
+# A go.work workspace of two modules, vendored at the workspace root. Each module is analyzed as
+# the workspace builds it. Module a calls gjson's vulnerable Get and module b only calls Valid.
+init:
+  controls: [sca, secrets, sast, iac]
+  scanners: [sast.gosec]
+  reachability: [govulncheck]
+  components:
+    - name: go-workspace
+      repositories: ["."]
+  # --per-directory: a component for each directory with its own dependency file, carved
+  # out of the root component.
+  perDirectory:
+    controls: [sca, secrets, sast, iac]
+    scanners: [sast.gosec]
+    reachability: [govulncheck]
+    components:
+      - name: go-workspace
+        repositories: ["."]
+        ignore: [a/, b/]
+      - name: a
+        repositories: ["."]
+        paths: [a]
+      - name: b
+        repositories: ["."]
+        paths: [b]
+
+findings:
+  - control: sca
+    tool: trivy
+    rule: CVE-2020-36067
+    location: a/go.mod:5
+    package: gomod github.com/tidwall/gjson v1.6.5
+    reachability: reachable
+  - control: sca
+    tool: trivy
+    rule: CVE-2020-36067
+    location: b/go.mod:5
+    package: gomod github.com/tidwall/gjson v1.6.5
+    reachability: unreachable

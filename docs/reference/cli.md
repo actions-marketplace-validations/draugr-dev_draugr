@@ -159,18 +159,38 @@ and which change it is looking at. You do not set those; the platform does.
 
 ## `draugr init [dir]`
 
-Scaffold a `draugr.saga.yaml` for a project (default: the current directory), detecting the stack to
-pre-fill sensible controls, Go adds `gosec` to `sast`, a `Dockerfile` adds an `images` stub,
-dependency manifests confirm `sca`. Edit it, then `draugr scan`.
+Scaffold a `draugr.saga.yaml` for a project (default: the current directory) from what its tree
+holds. `sca`, `secrets`, `sast` and `iac` are always on; the tree adds scanners and stubs to them,
+each with a comment naming the files behind it. Edit it, then `draugr scan`.
+
+| Found in the tree | Written |
+|---|---|
+| `go.mod` | `sast.gosec` · `config.reachability.analyzers: [govulncheck]` |
+| Copied JavaScript: `*.min.js`, a file named for its release, anything under `vendor/` | `sca.retirejs` |
+| `setup.py`, `pdm.lock` | `sca.grypeFs`, since Trivy reads neither |
+| Terraform, Helm, Kubernetes, a Dockerfile | named in the `iac` comment |
+| A Dockerfile | a commented `images` control and image entry |
+| An OpenAPI or Swagger document | a commented host with `spec: path:` pointing at it |
+| A dependency file with no lockfile, or with no exact version | a comment on the component, and a row under `UNREAD` |
+
+The console lists what was found under `FOUND` and the dependency files no scanner can take
+packages from under `UNREAD`.
+
+A directory below the root that holds its own dependency file is a part of the repository. By
+default the descriptor has one component and names the parts in a comment; `--per-directory`
+writes a component for each, scoped with `paths:`, and the root component `ignore:`s them.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o, --output` | `draugr.saga.yaml` | Path to write (`-` for stdout) |
 | `-f, --force` | `false` | Overwrite an existing file |
+| `--per-directory` | `false` | Write a component for each directory that holds its own dependency file |
+| `--fragment` | `false` | Write a Saga fragment: one component, no release and no policy |
 
 ```bash
 draugr init                 # write draugr.saga.yaml for the current project
 draugr init -o - | less     # preview without writing
+draugr init --per-directory # one component per directory with its own dependency file
 draugr init services/payments --fragment    # a Saga fragment, component named for the directory
 ```
 
@@ -394,7 +414,7 @@ Grouped the way `draugr scan --help` groups them.
 | `--view` | `findings` | What the report shows. `findings` gives a row each with what argued with the band underneath; `actions` gives a row per thing to do, saying how many findings it clears; `compact` gives one line each, and in `json`/`sarif` output strips indentation and rule documentation for a consumer that parses rather than reads. A view is a rendering: the report files always carry every finding separately. See [what to fix first](../concepts/what-to-fix-first.md) and [machine-readable output](../guides/reports-and-publishers.md#compact-output-for-tools-and-agents) |
 | `--group` | | Deprecated. `--group action` is `--view actions`, `--group none` is `--view findings` |
 | `--evidence` | `false` | Console: also print what stands behind the verdict, tool provenance, what each control measured against, the scanned revision, and what the run cost. `--report evidence` writes the same content to a file |
-| `--top` | `10` | Console: max findings to list in the ranked table (`0` = all). The heading says whether you are looking at a shortlist or every finding |
+| `--top` | `10` | Console: max findings to list in the ranked table (`0` = all). The heading says whether you are looking at a shortlist or every finding. `0` also names every file under **Unread**, where the default is three per component |
 | `--min-priority` |, | List findings at or above this priority band (`P1`–`P4`). Narrows what is **printed**; artifacts and publishers keep the full set. See [below](#what---min-priority-narrows) |
 | `--artifact-min-priority` |, | Also narrow the `-o` artifacts to this band, and record the band inside them. The deliberate opposite of `--min-priority`, and safe for the same reason it is declared. See [below](#what---min-priority-narrows) |
 | `--compact` | `false` | Deprecated. Use `--view compact` |
@@ -519,8 +539,15 @@ But a report that cannot say which build produced its findings cannot be reprodu
 
 ```
 scanners    gitleaks 8.30.1, trivy 0.69.3
-unverified  semgrep 1.173.0 · found on PATH; Draugr did not install it, `draugr tools install
-            semgrep` provisions a pinned build
+unverified  semgrep 1.173.0 · not installed by Draugr
+```
+
+Where Draugr could have installed it, `TRY` says so with the command, because that is where a scan
+puts the things to run next:
+
+```
+TRY
+  draugr tools install semgrep   scan on builds Draugr fetched and checked
 ```
 
 The first line lists the builds Draugr fetched **and checked**: each sits in `~/.draugr/bin`, the
@@ -531,6 +558,23 @@ The version is on both lines, and on the second it is the whole point. A tool Dr
 be identified from its install record; one you brought cannot, so Draugr asks it, which is what lets
 the report name the build behind a finding rather than only disclaiming responsibility for it. A
 tool that will not say gets no version, and that too is recorded rather than guessed.
+
+### `DESCRIPTOR`, under `--evidence`
+
+A descriptor assembled from more than one file gets a section naming each, so the evidence row
+above it can stay a summary:
+
+```
+DESCRIPTOR
+  draugr.saga.yaml                    root · 3b0afb46b138
+  security/exclusions.saga-fragment.yaml  051d25d1f323
+  platform/shared.saga-fragment.yaml  github.com/acme/platform@v2.4.0 · d6a7fb0a3f4b
+```
+
+A file beside the descriptor carries its own digest, which answers *is this the text somebody
+reviewed*. A fragment from another repository carries that repository, the revision it was pinned
+at, and the commit that turned out to be, because a tag moves and only the commit makes the run
+reproducible. A descriptor that is a single file gets no section: the row above already named it.
 
 Everything else gets its own line with the reason, because that is the one you have to decide
 about. What Draugr can say about a binary has five levels:
@@ -764,9 +808,11 @@ CI that is the intent. Locally it means scanning, editing and re-scanning produc
 files and an empty diff, commit between the two scans, or point `revision` at each revision in turn.
 See [URLs and paths](saga-schema.md#where-a-repository-comes-from-urls-and-paths).
 
-**Finding identity.** Findings are matched on `(tool, rule, file, message)`, deliberately ignoring
-the line number (which drifts as code moves) and the severity level (a re-scored finding is still
-the same issue), so genuinely-carried-over findings aren't reported as fixed + new.
+**Finding identity.** A finding in both reports is matched by a hash of the lines around it where
+it has one, and otherwise by tool, rule, file, message, component and repository. The line number
+and the severity are never part of it, so a finding that moved or was re-scored is unchanged rather
+than fixed and new. The [diff guide](../guides/pr-diff.md#what-counts-as-the-same-finding) has the
+detail.
 
 ---
 
@@ -784,10 +830,37 @@ belong to:
 | `draugr survey github repos` | repositories in a GitHub organization | `--org` |
 | `draugr survey gitlab projects` | projects in a GitLab group, subgroups included | `--group` |
 | `draugr survey azure repos` | Git repositories in an Azure DevOps organization or project | `--org`, `--project` |
+| `draugr survey provenance` | who signs the images the descriptor already declares | `--trust-root` |
 
 Shared by all of them: `-o, --output` (default stdout), `--replace`, `--fragment`, `--name`,
 `--version`. The `k8s` group also takes `--context`, which selects the cluster for both of its
 surveyors.
+
+`provenance` is the one that reads `--output` as well as writing it. The images it asks about are
+the ones the descriptor already declares, so there is no system to point it at instead, and a
+descriptor that does not exist yet is an error rather than an empty result.
+
+### Discovering who signs your images
+
+Writing `signers:` by hand means already knowing the identity a build signs with. A job calling a
+reusable workflow is signed as that workflow's repository rather than as the caller, so the obvious
+value is the wrong one, and it fails later as a mismatch rather than as a syntax error.
+
+```bash
+draugr survey provenance -o draugr.saga.yaml
+```
+
+It writes the exact identity and the exact image, never a pattern, and groups images sharing an
+identity under one signer. An unsigned image produces no signer and is not an error.
+
+**Read what it proposes.** A signer is a statement about who is trusted to sign, and one derived
+from what signs an image today cannot fail the check it was derived from. That is what makes it
+useful, because it is a tripwire for the signature changing rather than proof that today's is
+right, and it is worth what the first observation was worth. The command names each identity it adopted and
+the image it came from, and writes the same note beside the value in the descriptor.
+
+An organization running its own Sigstore passes `--trust-root`, naming the same file
+`config.controls.provenance.trustRoot` does.
 
 ### Writing a fragment instead of a descriptor
 
@@ -1291,28 +1364,36 @@ draugr tools list
 
 ## `draugr feeds`
 
-Fetch and inspect the exploitability datasets that raise a finding's severity by real-world
-signals. Fetching is explicit: a scan reads the cache and never reaches the network on its own,
-so a gated run stays reproducible and works on an air-gapped runner.
+Fetch and inspect the datasets a scan reads from `~/.draugr/feeds`. Fetching is explicit: a scan
+reads the cache and never reaches the network on its own, so a gated run stays reproducible and
+works on an air-gapped runner.
 
-### `draugr feeds update [kev|epss]`
+| Feed | Dataset | Read by |
+|------|---------|---------|
+| `kev` | CISA's Known Exploited Vulnerabilities catalog | [exploitability](saga-schema.md#configexploitability) |
+| `epss` | FIRST's EPSS scores | [exploitability](saga-schema.md#configexploitability) |
+| `govulndb` | the Go vulnerability database | [govulncheck](../../internal/scanners/govulncheck.md) |
 
-Download CISA's KEV catalog and FIRST's EPSS scores into `~/.draugr/feeds`. With no arguments,
-fetches both. A copy less than a day old is left alone unless `--force` is given.
+### `draugr feeds update [kev|epss|govulndb]`
+
+Download the feeds into `~/.draugr/feeds`. With no arguments, fetches all three. A copy less than a
+day old is left alone unless `--force` is given.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--force` | `false` | fetch even if the cached copy is current |
 
 ```bash
-draugr feeds update            # both
+draugr feeds update            # all three
 draugr feeds update epss       # just the daily one
 draugr feeds update --force    # refetch regardless of age
 ```
 
 EPSS is published gzipped and is decompressed on the way in, so the cache holds a CSV the scanner
-can read directly. Each write is atomic. An interrupted fetch cannot leave half a catalog behind for
-the next scan to read as though it were complete.
+can read directly. The Go vulnerability database is published as a zip and unpacked into
+`~/.draugr/feeds/govulndb`, the directory govulncheck's `-db` reads; an archive whose index is
+empty or unreadable is refused and the previous copy kept. Each write is atomic. An interrupted
+fetch cannot leave half a catalog behind for the next scan to read as though it were complete.
 
 **In CI, run this as its own step.** A feed outage then fails where it happened rather than
 producing a scan that ranked everything as though nothing were exploited.
@@ -1322,13 +1403,16 @@ producing a scan that ranked everything as though nothing were exploited.
 What is cached, how old it is, where it came from, and the digest of each copy.
 
 ```
-FEED   FETCHED                AGE            SIZE       DIGEST
-kev    2026-08-01 09:12Z      6 hours        1.5 MiB    sha256:15b44d7c9c57
-epss   2026-07-29 08:55Z      3 days (stale) 10.3 MiB   sha256:41c20e9dc3cf
+FEED       FETCHED                AGE            SIZE       DIGEST
+kev        2026-09-23 22:05Z      6 hours        1.7 MiB    sha256:e4988831e6d3
+epss       2026-09-21 04:05Z      3 days (stale) 11.0 MiB   sha256:38015ed64ff2
+govulndb   2026-09-24 02:05Z      2 hours        3.2 MiB    sha256:f0645ee8b56c
 ```
 
-Age is the column that matters: EPSS is republished daily, so a stale copy does not fail. It ranks a
-finding lower than today's data would. A scan reading one warns and names the age.
+Age is the column that matters. A stale KEV or EPSS copy does not fail: it ranks a finding on older
+data, and a scan reading one warns and names the age. A stale `govulndb` copy is not read at all;
+govulncheck queries `vuln.go.dev` instead, and with `--offline` the control reports an error.
+`config.exploitability.maxAge` sets the limit for both.
 
 ### Using the cache in a scan
 
@@ -1375,7 +1459,7 @@ cache:                  # where results are reused between runs, and for how lon
   ttl: 24h
 tools:                  # which build `draugr tools install` fetches
   trivy: { version: "0.69.3" }
-controls:            # merged *underneath* the Saga, so a project overrides only what it names
+controllers:            # merged *underneath* the Saga, so a project overrides only what it names
   sast:
     semgrep:
       config: p/owasp-top-ten

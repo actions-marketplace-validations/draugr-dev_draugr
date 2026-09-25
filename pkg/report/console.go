@@ -8,8 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/draugr-dev/draugr/internal/english"
 	"github.com/draugr-dev/draugr/pkg/ci"
+	"github.com/draugr-dev/draugr/pkg/dephealth"
 	"github.com/draugr-dev/draugr/pkg/engine"
+	"github.com/draugr-dev/draugr/pkg/exploit"
 	"github.com/draugr-dev/draugr/pkg/norn"
 	"github.com/draugr-dev/draugr/pkg/saga"
 	"github.com/draugr-dev/draugr/pkg/sarif"
@@ -195,6 +198,9 @@ func (consoleReporter) Render(w io.Writer, d Data) error {
 		writeNotMeasured(w, col, d, width)
 		_, _ = fmt.Fprintln(w)
 	}
+	// In every view, for the reason "Not measured" is: a file no scanner read is part of the
+	// repository the verdict appears to cover.
+	writeUnread(w, col, d)
 
 	if !dense(d) {
 		writeComponents(w, col, d)
@@ -217,6 +223,10 @@ func (consoleReporter) Render(w io.Writer, d Data) error {
 	// The count says otherwise, and each reason travels in the SARIF next to the result it
 	// justifies.
 	writeAccepted(w, col, d, d.Evidence)
+	// After what was set aside and before the findings: the descriptor is what decided both, and a
+	// reader checking an exclusion against the file that made it wants the list of files in front
+	// of them rather than at the foot of the report.
+	writeDescriptorSources(w, col, d, d.Evidence)
 
 	if !d.Evidence {
 		writeGate(w, col, d, false, "")
@@ -258,7 +268,7 @@ func (consoleReporter) Render(w io.Writer, d Data) error {
 		// should be too.
 		if len(shown) < len(s.findings) {
 			_, _ = fmt.Fprintf(w, "\n… and %s not listed.\n",
-				plural(len(s.findings)-len(shown), "finding"))
+				english.Count(len(s.findings)-len(shown), "finding"))
 			truncated = true
 		}
 		_, _ = fmt.Fprint(w, "\n")
@@ -334,7 +344,7 @@ func fixFirstHeading(col tui.Painter, s summary, shown, total int) string {
 		// Say what was filtered, or a short list reads as a contradiction of the counts above.
 		filter = fmt.Sprintf(", %s and above", strings.ToUpper(s.minPriority))
 		if s.hidden > 0 {
-			filter += fmt.Sprintf("; %d lower-priority finding(s) hidden", s.hidden)
+			filter += "; " + english.Count(s.hidden, "lower-priority finding") + " hidden"
 		}
 	}
 	switch {
@@ -758,14 +768,7 @@ func band(f finding, marked bool) tui.Cell {
 // the dashboard.
 func movedBy(f finding) *movement {
 	if e := f.escalation; e != nil {
-		label := "KEV"
-		if e.Signal != "kev" {
-			label = "EPSS"
-			if e.Detail != "" {
-				label = e.Detail
-			}
-		}
-		return &movement{glyph: "↑", label: label, style: signalColor(e.Signal)}
+		return &movement{glyph: "↑", label: signalLabel(e), style: signalColor(e.Signal)}
 	}
 	// A control that declares its findings are not bounded by where the component sits.
 	if f.priorityFloor != "" {
@@ -938,7 +941,7 @@ func writeComponents(w io.Writer, col tui.Painter, d Data) {
 		// look like the whole.
 		_, _ = fmt.Fprintf(w, "  %s\n", col.Paint(cDim,
 			fmt.Sprintf("%s not tied to a component (project-wide controls)",
-				plural(d.UnattributedFindings, "finding"))))
+				english.Count(d.UnattributedFindings, "finding"))))
 	}
 	_, _ = fmt.Fprintln(w)
 }
@@ -1070,12 +1073,6 @@ func sortedKeys(m map[string][]string) []string {
 	return out
 }
 
-// plural renders a count with its noun, pluralized the simple way. Only used for the SBOM
-// summary line, where "1 documents" would look like a bug in the tool.
-func plural(n int, word string) string {
-	return fmt.Sprintf("%d %s", n, noun(n, word))
-}
-
 // writeMeasuredAgainst records what each scanner measured and against what, under the controls it
 // describes.
 //
@@ -1193,7 +1190,7 @@ func unpinnedCacheLine(refs []string) string {
 	// of thirty, and that is the part the rows cannot say. Which ones, for a run with no findings
 	// to mark, is in the JSON and in --evidence.
 	return fmt.Sprintf("from cache, %s reused on a tag, so it may describe an earlier build. Pin a digest.",
-		plural(len(refs), "image"))
+		english.Count(len(refs), "image"))
 }
 
 // historicalNote says that a finding's location is a path in a commit rather than in the tree.
@@ -1228,7 +1225,7 @@ func runLine(st engine.Stats) string {
 	if st.Jobs == 0 || st.Duration <= 0 {
 		return ""
 	}
-	line := fmt.Sprintf("%s in %s", plural(st.Jobs, "job"), st.Duration.Round(time.Millisecond))
+	line := fmt.Sprintf("%s in %s", english.Count(st.Jobs, "job"), st.Duration.Round(time.Millisecond))
 	// Only where it bound the run. Concurrency is a ceiling, and a run with fewer jobs than the
 	// ceiling never reached it: "30 jobs, 32 at a time" is arithmetic that does not add up, and a
 	// reader who tries to make it add up is reading a number that was never going to help them.
@@ -1353,34 +1350,86 @@ func toolBuildLines(tools []ToolBuild) []string {
 //
 // A table rather than a sentence each. A component may hold several repositories and a descriptor
 // may hold many components, so this is the block that grows without bound, and fifty sentences
-// each naming a URL in the middle of them cannot be compared. The host is dropped with it: every
-// row would carry the same one, and what tells them apart is the path.
+// each naming a URL in the middle of them cannot be compared.
+//
+// The host stays. It was dropped on the argument that every row carries the same one, which is
+// true of a project whose repositories all live in one place and false of the ones this block
+// exists for: a descriptor that reads from a forge and a vendor's mirror has two rows that differ
+// only there, and neither says which is which.
 func repositoryRows(repos []RepositoryProvenance) [][2]string {
 	out := make([][2]string, 0, len(repos))
 	for _, r := range repos {
-		where := r.URL
-		if short := strings.TrimPrefix(strings.TrimPrefix(where, "https://"), "http://"); short != where {
-			if _, path, ok := strings.Cut(short, "/"); ok && path != "" {
-				where = path
-			}
+		where := repositoryName(r.URL)
+		// Named, because eight characters of hex is not self-evidently anything and this block
+		// prints three different kinds of it. A reader who does not already know cannot tell a
+		// commit from the digest of a file two rows down.
+		var said string
+		if rev := r.Short(); rev != "" {
+			said = "commit " + rev
 		}
-		said := r.Short()
+		// Clauses after it, each one a fact about the scan, so the revision is always the first
+		// thing in this column and always says what it is.
+		var notes []string
 		if r.WorkingTree {
-			said = strings.TrimSpace("working tree " + said)
+			notes = append(notes, "working tree")
+		}
+		// Said rather than left to be inferred from a path that means nothing on anybody else's
+		// machine. A checkout with no remote has no portable identity, which is legitimate and is
+		// the reason this row cannot name one.
+		if localPath(r.URL) {
+			notes = append(notes, "no git remote")
 		}
 		switch {
 		case r.WorkingTree && r.Uncommitted > 0:
 			// The uncommitted work is the reason this scan was asked for, so it is included rather
 			// than missing, and the result cannot be reproduced from the revision.
-			said += fmt.Sprintf(" · %s, not reproducible", plural(r.Uncommitted, "uncommitted file"))
+			notes = append(notes,
+				fmt.Sprintf("%s, not reproducible", english.Count(r.Uncommitted, "uncommitted file")))
 		case r.Uncommitted > 0:
 			// A clause, not an alarm. Uncommitted work is the normal state of a checkout somebody
 			// is editing; what matters is knowing it is not in what you are reading.
-			said += fmt.Sprintf(" · %s not included", plural(r.Uncommitted, "uncommitted file"))
+			notes = append(notes,
+				fmt.Sprintf("%s not included", english.Count(r.Uncommitted, "uncommitted file")))
+		}
+		if len(notes) > 0 {
+			said = strings.TrimPrefix(said+" · "+strings.Join(notes, " · "), " · ")
 		}
 		out = append(out, [2]string{where, strings.TrimSpace(said)})
 	}
 	return out
+}
+
+// repositoryName renders a repository the way every other row that names one does.
+//
+// The scheme goes, because it is the transport rather than the repository, and `.git` goes with
+// it: the same repository cloned with and without the suffix is one repository, and a reader
+// comparing this against a descriptor fragment's row should not have to notice the difference.
+//
+// Rendering only. The string this trims is what a finding is identified by downstream, where two
+// spellings of one repository are already two, and normalizing it there would make every finding
+// recorded under the old spelling a different finding.
+func repositoryName(url string) string {
+	if localPath(url) {
+		return url
+	}
+	// Only the two that are noise. Every row carries one or the other and neither tells a reader
+	// anything, where any other scheme is part of what the address is: dropping it from
+	// `file:///srv/mirror` leaves a string that reads as a path on the reader's own machine.
+	for _, transport := range []string{"https://", "http://"} {
+		if rest, ok := strings.CutPrefix(url, transport); ok {
+			url = rest
+			break
+		}
+	}
+	return strings.TrimSuffix(url, ".git")
+}
+
+// localPath reports whether this is a directory on the machine that scanned rather than a
+// repository anybody else can name. It is what `Source()` falls back to when a checkout has no
+// remote to resolve.
+func localPath(url string) bool {
+	return url == "" || strings.HasPrefix(url, ".") || strings.HasPrefix(url, "/") ||
+		strings.HasPrefix(url, "~")
 }
 
 // sbomLine reports what inventory the run produced.
@@ -1403,11 +1452,11 @@ func sbomLine(docs []sbom.Document) string {
 	}
 	switch {
 	case project && parts > 0:
-		return fmt.Sprintf("1 project document + %s (%s)", plural(parts, "component document"), docs[0].Format)
+		return fmt.Sprintf("1 project document + %s (%s)", english.Count(parts, "component document"), docs[0].Format)
 	case project:
 		return fmt.Sprintf("1 project document (%s)", docs[0].Format)
 	default:
-		return fmt.Sprintf("%s (%s)", plural(parts, "document"), docs[0].Format)
+		return fmt.Sprintf("%s (%s)", english.Count(parts, "document"), docs[0].Format)
 	}
 }
 
@@ -1454,12 +1503,12 @@ func writeActions(w io.Writer, col tui.Painter, s summary, d Data, limit int) (t
 		shown = shown[:limit]
 	}
 	_, _ = fmt.Fprintf(w, "%s  %s\n", heading(col, "What to do"), col.Paint(cDim, fmt.Sprintf(
-		"%s %s %s", plural(len(shown), "action"), clears(shown), plural(cleared(shown), "finding"))))
+		"%s %s %s", english.Count(len(shown), "action"), clears(shown), english.Count(cleared(shown), "finding"))))
 	renderActions(w, col, shown, d.View == ViewCompact)
 
 	if len(shown) < len(actions) {
 		_, _ = fmt.Fprintf(w, "\n… and %s not listed.\n",
-			plural(len(actions)-len(shown), "action"))
+			english.Count(len(actions)-len(shown), "action"))
 		truncated = true
 	}
 	if len(external) > 0 {
@@ -1546,14 +1595,14 @@ func writeSignals(w io.Writer, col tui.Painter, d Data, s summary) {
 		// feed changed nothing is to read every finding looking for a mark that is not there.
 		did := "nothing raised"
 		if n > 0 {
-			did = fmt.Sprintf("%s raised", plural(n, "finding"))
+			did = fmt.Sprintf("%s raised", english.Count(n, "finding"))
 		}
 		signals = append(signals, signal{name: strings.ToUpper(name), did: did})
 	}
 	if n := s.floored; n > 0 {
 		signals = append(signals, signal{
 			name: "floor",
-			did:  fmt.Sprintf("%s raised by a control's own rule", plural(n, "finding")),
+			did:  fmt.Sprintf("%s raised by a control's own rule", english.Count(n, "finding")),
 		})
 	}
 	// Named for what it is rather than for the tool that did it. "govulncheck" in the left column
@@ -1656,8 +1705,8 @@ func writeAccepted(w io.Writer, col tui.Painter, d Data, full bool) {
 	// easiest to add without anybody noticing.
 	if line := silencedLine(d); line != "" {
 		rows = append(rows, acceptedRow{
-			where: "source directives",
-			said:  []string{strings.TrimPrefix(line, "source directives: ")},
+			where: "scanner exclusions",
+			said:  []string{strings.TrimPrefix(line, "scanner exclusions: ")},
 		})
 	}
 
@@ -1699,6 +1748,61 @@ func writeAccepted(w io.Writer, col tui.Painter, d Data, full bool) {
 	draw("Unmatched", unmatched)
 }
 
+// writeDescriptorSources names every file the descriptor was assembled from, under --evidence.
+//
+// A section rather than a clause on the evidence row. How many files a descriptor is split across
+// is the reader's own decision, so the list has no length this can predict, and a set with no end
+// is a set that gets its own block rather than a line that grows.
+//
+// Only where there is more than one. A descriptor that is a single file has already been named on
+// the row above, and a section repeating it is a heading for one fact.
+func writeDescriptorSources(w io.Writer, col tui.Painter, d Data, full bool) {
+	if !full || d.Descriptor == nil || len(d.Descriptor.Sources) < 2 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, heading(col, "Descriptor"))
+	t := tui.NewTable(col).Indent("  ")
+	for _, src := range d.Descriptor.Sources {
+		t.Row(tui.Styled(tui.StyleStrong, src.Path), tui.Styled(cDim, descriptorSourceNote(src)))
+	}
+	t.Render(w)
+	_, _ = fmt.Fprintln(w)
+}
+
+// descriptorSourceNote says where one file came from and which text it was.
+//
+// The repository first where there is one: a path alone says which file inside a tree, and a
+// fragment pulled from somebody else's repository is a file this checkout does not contain, which
+// is the thing a reader cannot work out from the name. The commit is the resolved one rather than
+// the branch that was asked for, since a branch moves and only the commit makes a run reproducible.
+func descriptorSourceNote(src skald.DescriptorSource) string {
+	var parts []string
+	if src.Root {
+		parts = append(parts, "root")
+	}
+	// Both hashes below are named for the same reason the revision is on the row above: this block
+	// prints a commit and a content digest, they look alike, and they answer different questions.
+	if src.URL != "" {
+		// What was asked for and what it turned out to be, both: a tag is how somebody refers to a
+		// version of a shared policy, and the commit is what makes the run reproducible after the
+		// tag has moved. The file's own digest is left off here, because the commit already pins
+		// the tree it came out of and two hex strings on one row is one too many to compare.
+		where := repositoryName(src.URL)
+		if src.Revision != "" {
+			where += "@" + src.Revision
+		}
+		parts = append(parts, where)
+		if src.Resolved != "" && src.Resolved != src.Revision {
+			parts = append(parts, "commit "+shortDigest(src.Resolved))
+		}
+		return strings.Join(parts, " · ")
+	}
+	if src.Digest != "" {
+		parts = append(parts, "digest "+shortDigest(src.Digest))
+	}
+	return strings.Join(parts, " · ")
+}
+
 // writeDecisions accounts for each acceptance separately, under --evidence.
 //
 // The reason leads, on a line of its own, because it is the only part a reader has to judge. Who
@@ -1724,7 +1828,7 @@ func writeDecisions(w io.Writer, col tui.Painter, d Data, full bool) {
 		}
 		parts := []string{
 			col.Paint(cDim, "accepted by") + " " + who,
-			col.Paint(cDim, "covers") + " " + plural(dec.n, "finding"),
+			col.Paint(cDim, "covers") + " " + english.Count(dec.n, "finding"),
 		}
 		if said := decisionRules(dec.rules); said != "" {
 			parts = append(parts, said)
@@ -1748,7 +1852,7 @@ func decisionRules(rules []string) string {
 	case len(rules) <= maxNamedRules:
 		return strings.Join(rules, ", ")
 	}
-	return plural(len(rules), "rule")
+	return english.Count(len(rules), "rule")
 }
 
 // maxNamedRules is how many rules a decision names before counting them instead.
@@ -1844,7 +1948,7 @@ func externalLine(external []finding) string {
 	}
 	sort.Strings(names)
 	return fmt.Sprintf("%s on infrastructure operated by your provider (%s), reported, "+
-		"and not yours to fix.", plural(len(external), "finding"), strings.Join(names, ", "))
+		"and not yours to fix.", english.Count(len(external), "finding"), strings.Join(names, ", "))
 }
 
 // renderActions draws the action rows.
@@ -1883,7 +1987,7 @@ func renderActions(w io.Writer, col tui.Painter, actions []action, compact bool)
 		// flat grey gives a reader nothing to find.
 		meta := []string{
 			col.Paint(cDim, "control") + " " + a.control,
-			col.Paint(tui.StyleFixed, plural(a.count(), "finding")),
+			col.Paint(tui.StyleFixed, english.Count(a.count(), "finding")),
 		}
 		if a.upstream {
 			meta = append(meta, col.Paint(cDim, "upstream"))
@@ -1914,7 +2018,7 @@ func renderActions(w io.Writer, col tui.Painter, actions []action, compact bool)
 // metaWidth is what an action's labeled facts occupy before the detail is added, so the detail
 // can be budgeted against what is left rather than against the whole line.
 func metaWidth(a action, parts int) int {
-	n := len("control ") + len(a.control) + len(plural(a.count(), "finding"))
+	n := len("control ") + len(a.control) + len(english.Count(a.count(), "finding"))
 	if a.upstream {
 		n += len("upstream")
 	}
@@ -1945,23 +2049,6 @@ func actionDetail(col tui.Painter, a action, locations int) string {
 	}
 	return strings.Join(parts, " · ")
 }
-
-// noun agrees a bare noun with a count, for sentences that put the number elsewhere.
-//
-// Handles the one irregularity the vocabulary here actually contains: a word ending in a
-// consonant and "y" takes "ies". "repositorys" is the sort of thing a reader notices and a tool
-// does not, and it makes everything around it look less carefully made than it is.
-func noun(n int, word string) string {
-	if n == 1 {
-		return word
-	}
-	if len(word) > 1 && word[len(word)-1] == 'y' && !isVowel(word[len(word)-2]) {
-		return word[:len(word)-1] + "ies"
-	}
-	return word + "s"
-}
-
-func isVowel(b byte) bool { return strings.IndexByte("aeiou", b) >= 0 }
 
 // elide shortens the last line of a wrapped message, at a word boundary where there is one.
 //
@@ -2078,10 +2165,10 @@ func unscannedDetail(us []engine.Unscanned, declared map[string]int) string {
 		// "3 of 3" and "3 of 30" are different situations. One is a component nothing looked at, the
 		// other a gap in one that was mostly covered. And the bare count reads as the first either way.
 		if total := declared[kind]; total > 0 {
-			parts = append(parts, fmt.Sprintf("%d/%d %s", byKind[kind], total, noun(total, kind)))
+			parts = append(parts, fmt.Sprintf("%d/%d %s", byKind[kind], total, english.Noun(total, kind)))
 			continue
 		}
-		parts = append(parts, plural(byKind[kind], kind))
+		parts = append(parts, english.Count(byKind[kind], kind))
 	}
 	return strings.Join(parts, ", ") + " not scanned"
 }
@@ -2215,7 +2302,7 @@ func descriptorLine(d *skald.DescriptorRef) string {
 	}
 	line := root
 	if n := len(d.Sources) - 1; n > 0 {
-		line += fmt.Sprintf(" + %s", plural(n, "fragment"))
+		line += fmt.Sprintf(" + %s", english.Count(n, "fragment"))
 	}
 	if d.Digest != "" {
 		// Named, because eight characters of hex is not self-evidently anything. It is the digest
@@ -2228,6 +2315,9 @@ func descriptorLine(d *skald.DescriptorRef) string {
 
 // shortDigest keeps a digest recognizable without spending a line on it. Twelve hex characters is
 // what git settled on for the same job.
+//
+// A tag or a branch name reaches this too, from a fragment's resolved revision, and comes back
+// unchanged: anything already shorter than a shortened digest is already the thing a reader reads.
 func shortDigest(d string) string {
 	hex := strings.TrimPrefix(d, "sha256:")
 	if len(hex) > 12 {
@@ -2259,5 +2349,30 @@ func jobPath(c *ci.Context) string {
 		return c.Workflow
 	default:
 		return c.Job
+	}
+}
+
+// signalLabel is what a mark says on one line of a report.
+//
+// Short, because it sits between a finding's title and the things a reader acts on: the component,
+// the scanner and the fix. EPSS is the exception that earns its value, because the number is the
+// whole signal and "EPSS" alone says only that a prediction exists.
+//
+// A publisher's deprecation notice can run to a paragraph and is not this. It travels in full in
+// the SARIF and the JSON, and the rendered report has the width to show it; a terminal does not,
+// and a sentence here pushes the fix off the screen to repeat a word already in the label.
+func signalLabel(e *sarif.Escalation) string {
+	switch e.Signal {
+	case exploit.SignalKEV:
+		return "KEV"
+	case dephealth.SignalMalicious:
+		return "malicious"
+	case dephealth.SignalDeprecated:
+		return "deprecated"
+	default: // EPSS, whose detail carries the score
+		if e.Detail != "" {
+			return e.Detail
+		}
+		return "EPSS"
 	}
 }

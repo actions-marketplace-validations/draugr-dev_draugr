@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/draugr-dev/draugr/internal/english"
 	"github.com/draugr-dev/draugr/pkg/ci"
 	"github.com/draugr-dev/draugr/pkg/engine"
 	"github.com/draugr-dev/draugr/pkg/norn"
@@ -246,6 +247,15 @@ type FeedProvenance struct {
 // different and usually less useful question than "is my service".
 type ComponentVerdict struct {
 	Name string
+	// Exposure and Criticality are what the descriptor declared this component to be, and empty
+	// where it declared nothing.
+	//
+	// Carried beside the verdict because they are half of why the verdict is what it is: the same
+	// finding bands differently on a public, critical service and an internal, supporting one, and
+	// a reader comparing two rows of this table without them is comparing two numbers whose
+	// difference has no visible cause.
+	Exposure    string
+	Criticality string
 	// Verdict is the run's policy applied to this component's findings alone. Computed by
 	// running the same norn.Policy rather than re-deciding, so the parts cannot disagree with
 	// the whole about what failing means.
@@ -413,9 +423,21 @@ type jsonReporter struct{}
 func (jsonReporter) Format() string { return "json" }
 func (jsonReporter) Render(w io.Writer, d Data) error {
 	return skald.RenderJSONFor(w, d.ProjectName(), d.Release, d.Run, d.Verdict, d.MinPriority,
-		skaldFeeds(d.Exploitability), d.marshalOptions(),
-		skald.Provenance{Descriptor: d.Descriptor, CI: d.CI, Gate: d.Gate.skald()})
+		d.JSONFeeds(), d.marshalOptions(), d.JSONProvenance())
 }
+
+// JSONProvenance is what produced the run, as the JSON document records it: the descriptor, the CI
+// job and the gate.
+//
+// One function for every path that writes the document, the -o artifact and the reporter a
+// publisher uses, so a report.json on disk and the same run's --format json cannot record
+// different provenance.
+func (d Data) JSONProvenance() skald.Provenance {
+	return skald.Provenance{Descriptor: d.Descriptor, CI: d.CI, Gate: d.Gate.skald()}
+}
+
+// JSONFeeds is the exploitability data the run was ranked against, as the JSON document records it.
+func (d Data) JSONFeeds() []skald.FeedProvenance { return skaldFeeds(d.Exploitability) }
 
 // skaldFeeds converts the report's feed provenance into the JSON document's shape.
 func skaldFeeds(feeds []FeedProvenance) []skald.FeedProvenance {
@@ -887,8 +909,8 @@ func provenanceLines(d Data) []provenanceLine {
 	}
 	sort.Strings(names)
 
-	// A reachability analyzer accounts for itself in its own block, beside the counts its
-	// statement qualifies.
+	// A reachability analyzer accounts for its coverage in its own block, beside the counts that
+	// statement qualifies. What else it says, such as the database it read, belongs here.
 	analyzers := map[string]bool{}
 	for _, a := range d.Run.Reachability.Analyzers {
 		analyzers[a.Analyzer] = true
@@ -898,7 +920,7 @@ func provenanceLines(d Data) []provenanceLine {
 	for _, name := range names {
 		for _, p := range d.Run.Controls[name].Report.Provenance {
 			if analyzers[p.Tool] {
-				continue
+				p.Fields = withoutField(p.Fields, "coverage")
 			}
 			// The repository and revision are reported once for the run, not once per control:
 			// five controls reading one checkout is one fact, and repeating it five times in a
@@ -916,6 +938,17 @@ func provenanceLines(d Data) []provenanceLine {
 			out = append(out, provenanceLine{
 				Control: name, Tool: p.Tool, Version: p.Version, Detail: detail,
 			})
+		}
+	}
+	return out
+}
+
+// withoutField drops every field with the given key, leaving the rest in order.
+func withoutField(fields []sarif.Field, key string) []sarif.Field {
+	out := make([]sarif.Field, 0, len(fields))
+	for _, f := range fields {
+		if f.Key != key {
+			out = append(out, f)
 		}
 	}
 	return out
@@ -997,7 +1030,7 @@ func suppressionLine(d Data, full bool) string {
 	if n == 0 {
 		return ""
 	}
-	line := fmt.Sprintf("config.exclude: %s suppressed", plural(n, "finding"))
+	line := fmt.Sprintf("config.exclude: %s suppressed", english.Count(n, "finding"))
 	if !full {
 		return line
 	}
@@ -1006,17 +1039,32 @@ func suppressionLine(d Data, full bool) string {
 	// the exclusions live somewhere other than the file you opened.
 	if sources := suppressionSources(d); len(sources) > 1 {
 		var where []string
+		// How many files a descriptor is split across is the customer's decision, so this is a list
+		// with no end a reader can predict. Named while it is a set somebody reads, counted once it
+		// is a set they scan past, and the fragments are sorted by weight so the ones named are the
+		// ones carrying most of the exclusions.
+		if len(sources) > mostSourcesNamed {
+			line = fmt.Sprintf("config.exclude: %s suppressed · across %s",
+				english.Count(n, "finding"), english.Count(len(sources), "file"))
+			return line
+		}
 		for _, src := range sources {
 			where = append(where, fmt.Sprintf("%d from %s", src.n, src.name))
 		}
 		line = fmt.Sprintf("config.exclude: %s suppressed · %s",
-			plural(n, "finding"), strings.Join(where, ", "))
+			english.Count(n, "finding"), strings.Join(where, ", "))
 	}
 	// Who accepted what used to be appended here, and it is a table now: one row per decision,
 	// carrying the reason as well as the name, which a clause in a sentence has no room for. A
 	// count and a roll call of the same findings on one line is the same fact twice.
 	return line
 }
+
+// mostSourcesNamed is how many descriptor files the breakdown names before it counts them instead.
+//
+// Four fits the line at every width the report is read at, and past four the names stop being a
+// thing somebody reads and become a thing they scan past on the way to the number.
+const mostSourcesNamed = 4
 
 // importedLine renders the one-line account of what a supplier's own analysis excused, and under
 // `full` which supplier said so.
@@ -1028,7 +1076,7 @@ func importedLine(d Data, full bool) string {
 	if n == 0 {
 		return ""
 	}
-	line := fmt.Sprintf("VEX: %s excused", plural(n, "finding"))
+	line := fmt.Sprintf("VEX: %s excused", english.Count(n, "finding"))
 	if !full {
 		return line
 	}
@@ -1048,17 +1096,19 @@ func importedLine(d Data, full bool) string {
 // A third line rather than a third number on an existing one, and for the same reason the imported
 // count is its own: the three answer the auditor's question with different people at the end of
 // them. A descriptor rule was written where whoever owns the descriptor can see it. A supplier's
-// claim is answerable by the supplier. This one was written by whoever was editing the file, and
-// nobody else necessarily knows it is there. Which is exactly why it is the one most worth
-// printing.
+// claim is answerable by the supplier. This one was written wherever it was convenient, in a
+// comment or in the scanner's own configuration, and nobody else necessarily knows it is there.
+// Which is exactly why it is the one most worth printing.
 func silencedLine(d Data) string {
 	n := d.Run.Silenced
 	if n == 0 {
 		return ""
 	}
-	// Named for where it lives, like the others, and keeping what makes it the weakest of the
-	// three: a directive in the code is an acceptance with no author and no date.
-	return fmt.Sprintf("source directives: %s silenced, and nobody signed them", plural(n, "finding"))
+	// The count and nothing else, in the word the other rows use. What makes this row the weakest
+	// of the three, an exclusion with no author and no date, set outside the descriptor, is the
+	// argument for printing it rather than something to print on it: the label says which row this
+	// is and the documentation says what the label means.
+	return fmt.Sprintf("scanner exclusions: %s suppressed", english.Count(n, "finding"))
 }
 
 // alsoFoundBy is what the other scanners said about this same flaw.
@@ -1109,7 +1159,7 @@ func reachabilityBlock(d Data) (rows []string, notes []string) {
 			row += fmt.Sprintf(", %d unknown", a.Unknown)
 		}
 		if a.Contributed > 0 {
-			row += fmt.Sprintf(" (%s only it reported)", plural(a.Contributed, "finding"))
+			row += fmt.Sprintf(" (%s only it reported)", english.Count(a.Contributed, "finding"))
 		}
 		rows = append(rows, row)
 	}
@@ -1266,7 +1316,11 @@ func suppressionSources(d Data) []sourceCount {
 			// A supplier's claim is counted and attributed by importedLine, which names the
 			// author rather than the file. Counting it here as well made the breakdown sum to
 			// more than the total it was breaking down.
-			if res.Imported() {
+			//
+			// The scanner's own carry a file too, and it is the scanner's file rather than a
+			// fragment of this descriptor. Counted here it read as a `config.exclude` rule, which
+			// says this project signed something it never saw.
+			if res.Imported() || res.SetAsideByScanner() {
 				continue
 			}
 			counts[res.Suppression.Source]++
@@ -1435,6 +1489,8 @@ func acceptedVia(res sarif.Result) string {
 		return "VEX"
 	case res.SilencedInSource():
 		return "source directive"
+	case res.SetAsideByScanner():
+		return "scanner config"
 	default:
 		return "config.exclude"
 	}
@@ -1460,7 +1516,7 @@ func decisions(d Data) []decision {
 	var order []*decision
 	for _, cr := range d.Run.Controls {
 		for _, res := range cr.Report.Results {
-			if !res.Suppressed() || res.Imported() || res.SilencedInSource() {
+			if !res.Suppressed() || res.Imported() || res.SetAsideByScanner() {
 				continue
 			}
 			by := res.Suppression.AcceptedBy

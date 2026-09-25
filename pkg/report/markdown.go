@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/draugr-dev/draugr/internal/english"
 	"github.com/draugr-dev/draugr/pkg/norn"
 )
 
@@ -25,8 +26,8 @@ func (markdownReporter) Render(w io.Writer, d Data) error {
 		verdict = "❌ FAIL"
 	}
 	_, _ = fmt.Fprintf(w, "## Draugr · %s\n\n", verdict)
-	if name := d.ProjectName(); name != "" {
-		_, _ = fmt.Fprintf(w, "**Release:** %s %s\n\n", name, d.Release.Version)
+	if d.ProjectName() != "" {
+		_, _ = fmt.Fprintf(w, "**Release:** %s\n\n", releaseLabel(d))
 	}
 
 	if s.prioritized {
@@ -76,6 +77,7 @@ func (markdownReporter) Render(w io.Writer, d Data) error {
 		writeScanErrors(w, s)
 		writeNotMeasuredRows(w, d)
 	}
+	writeUnreadRows(w, d)
 
 	writeComponentTable(w, d)
 	writeEvidenceNotes(w, d)
@@ -94,7 +96,7 @@ func (markdownReporter) Render(w io.Writer, d Data) error {
 	if s.minPriority != "" {
 		heading := fmt.Sprintf("### Fix first (%s and above", strings.ToUpper(s.minPriority))
 		if s.hidden > 0 {
-			heading += fmt.Sprintf("; %d lower-priority finding(s) hidden", s.hidden)
+			heading += "; " + english.Count(s.hidden, "lower-priority finding") + " hidden"
 		}
 		_, _ = fmt.Fprintf(w, "%s)\n\n", heading)
 	} else {
@@ -132,7 +134,7 @@ func (markdownReporter) Render(w io.Writer, d Data) error {
 			dash(upgradeLabel(f)), findingTitle(f))
 	}
 	if len(s.findings) > markdownTopN {
-		_, _ = fmt.Fprintf(w, "\n_…and %d more finding(s)._\n", len(s.findings)-markdownTopN)
+		_, _ = fmt.Fprintf(w, "\n_…and %s more._\n", english.Count(len(s.findings)-markdownTopN, "finding"))
 	}
 	_, _ = fmt.Fprintln(w)
 	writeRunEvidence(w, d, s)
@@ -191,7 +193,7 @@ func writeEvidenceNotes(w io.Writer, d Data) {
 		accepted = append(accepted, row{"VEX", strings.TrimPrefix(line, "VEX: ")})
 	}
 	if line := silencedLine(d); line != "" {
-		accepted = append(accepted, row{"source directives", strings.TrimPrefix(line, "source directives: ")})
+		accepted = append(accepted, row{"scanner exclusions", strings.TrimPrefix(line, "scanner exclusions: ")})
 	}
 	if len(accepted) > 0 {
 		_, _ = fmt.Fprintln(w, "### Accepted")
@@ -271,7 +273,7 @@ func writeRunEvidence(w io.Writer, d Data, s summary) {
 		_, _ = fmt.Fprintf(&body, "- **Gate:** %s\n", strings.TrimPrefix(line, "Gate: "))
 	}
 	if s.sboms > 0 {
-		_, _ = fmt.Fprintf(&body, "- **SBOM:** %s (%s)\n", plural(s.sboms, "document"), s.sbomFormat)
+		_, _ = fmt.Fprintf(&body, "- **SBOM:** %s (%s)\n", english.Count(s.sboms, "document"), s.sbomFormat)
 	}
 	writeRepositories(&body, d)
 	writeProvenance(&body, d)
@@ -302,7 +304,7 @@ func writeRepositories(w io.Writer, d Data) {
 			line += " at `" + rev + "`"
 		}
 		if r.Uncommitted > 0 {
-			line += fmt.Sprintf(" · %s not included", plural(r.Uncommitted, "uncommitted file"))
+			line += fmt.Sprintf(" · %s not included", english.Count(r.Uncommitted, "uncommitted file"))
 		}
 		_, _ = fmt.Fprintln(w, line)
 	}
@@ -334,21 +336,35 @@ func writeComponentTable(w io.Writer, d Data) {
 	}
 	_, _ = fmt.Fprintln(w, "### Components")
 	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "| Component | Verdict | P1 | P2 | P3 | P4 | Failing controls |")
-	_, _ = fmt.Fprintln(w, "|---|---|---:|---:|---:|---:|---|")
+	_, _ = fmt.Fprintln(w, "| Component | Declared | Verdict | P1 | P2 | P3 | P4 | Failing controls |")
+	_, _ = fmt.Fprintln(w, "|---|---|---|---:|---:|---:|---:|---|")
 	for _, c := range d.Components {
 		v := "pass"
 		if c.Verdict == norn.Fail {
 			v = "**FAIL**"
 		}
-		_, _ = fmt.Fprintf(w, "| %s | %s | %d | %d | %d | %d | %s |\n",
-			c.Name, v, c.Priorities[0], c.Priorities[1], c.Priorities[2], c.Priorities[3],
-			dash(strings.Join(c.Controls, ", ")))
+		// A component nothing was able to look at has not passed. Its scans failed, so a row of
+		// four zeros beside the word "pass" is the report asserting something no scanner
+		// established, and a table is where that reads most like a result.
+		var notes []string
+		if len(c.Controls) > 0 {
+			notes = append(notes, strings.Join(c.Controls, ", "))
+		}
+		if len(c.Unscanned) > 0 {
+			if c.Findings == 0 {
+				v = "**ERROR**"
+			}
+			notes = append(notes, unscannedDetail(c.Unscanned, c.Declared))
+		}
+		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %d | %d | %d | %d | %s |\n",
+			c.Name, dash(classification(c.Exposure, c.Criticality)), v,
+			c.Priorities[0], c.Priorities[1], c.Priorities[2], c.Priorities[3],
+			dash(strings.Join(notes, "; ")))
 	}
 	_, _ = fmt.Fprintln(w)
 	if d.UnattributedFindings > 0 {
 		_, _ = fmt.Fprintf(w, "_%s not tied to a component (project-wide controls)._\n\n",
-			plural(d.UnattributedFindings, "finding"))
+			english.Count(d.UnattributedFindings, "finding"))
 	}
 }
 
@@ -423,12 +439,12 @@ func writeSignalRows(w io.Writer, d Data, s summary) {
 		}
 		did := "nothing raised"
 		if n > 0 {
-			did = fmt.Sprintf("%s raised", plural(n, "finding"))
+			did = fmt.Sprintf("%s raised", english.Count(n, "finding"))
 		}
 		sigs = append(sigs, sig{strings.ToUpper(name), did})
 	}
 	if n := s.floored; n > 0 {
-		sigs = append(sigs, sig{"floor", fmt.Sprintf("%s raised by a control's own rule", plural(n, "finding"))})
+		sigs = append(sigs, sig{"floor", fmt.Sprintf("%s raised by a control's own rule", english.Count(n, "finding"))})
 	}
 	rows, notes := reachabilityBlock(d)
 	for _, row := range rows {

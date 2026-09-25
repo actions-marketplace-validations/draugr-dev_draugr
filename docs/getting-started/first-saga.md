@@ -12,19 +12,15 @@ security surface and the controls that must pass. This page walks you from a one
 classified, multi-control descriptor. For the exhaustive field list, see the [Saga
 schema](../reference/saga-schema.md).
 
-> **Shortcut:** `draugr init` scaffolds this file for you, detecting your stack (Go, a
-> Dockerfile, dependency manifests) to pre-fill sensible controls, a good starting point to
-> edit. And if you just want a scan now, `draugr scan .` needs no Saga at all.
+> **Shortcut:** `draugr init` scaffolds this file from what your tree holds: dependency files,
+> copied JavaScript, infrastructure code, Dockerfiles and OpenAPI documents. And if you just want a scan now, `draugr scan .` needs no Saga at all.
 
 ## The smallest thing that runs
 
-A Saga names its project, gives a version, and declares at least one component with an
-enabled control:
+A Saga names its project and declares at least one component with an enabled control:
 
 ```yaml
 project: my-app
-release:
-  version: "1.0"
 config:
   controls:
     images:
@@ -36,7 +32,8 @@ components:
 ```
 
 Run it with `draugr scan draugr.saga.yaml`. A control only runs when it is **enabled**, globally
-under `config.controls`, or on an individual component.
+under `config.controls`, or on an individual component. `release: { version: "1.0" }` labels the
+reports with the build being scanned.
 
 ## Add more of your surface
 

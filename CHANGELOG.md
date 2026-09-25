@@ -12,6 +12,164 @@ and move it under a version on release.
 
 _Nothing yet._
 
+## [0.134.0] - 2026-09-25
+
+### Added
+
+- **A server that needs a newer Draugr says which version, and the scan says how to get it.** When a `draugr-api` server refuses a run as too old, the error names the version it needs, the version you ran, and `draugr self-update`, instead of the server's error code.
+
+- **`draugr init` reads the tree and enables what it finds.** Copied JavaScript enables retire.js, a `setup.py` or `pdm.lock` enables Grype, Go enables gosec and govulncheck reachability, and an OpenAPI document adds a commented host. Each line's comment names the files behind it; unread dependency files are listed. `--per-directory` writes a component per directory holding a dependency file.
+
+### Changed
+
+- **`release.version` is optional.** A Saga that names its project and its components is complete, and `draugr init` no longer writes a placeholder `0.0.0`. A version, where one is given, still labels every report and the VEX product identifier.
+
+### Fixed
+
+- **A `bun.lockb` or a conda `environment.yml` appears under Unread with the reason `no packages read`.** Both were counted as checked, though no scanner checks the packages in either.
+
+- **The `github` and `draugr-api` publisher errors no longer point at `config.reports`.** A missing report named the removed key as the place to add it, and a descriptor that followed the advice was refused.
+
+## [0.133.0] - 2026-09-25
+
+### Added
+
+- **A scan names the dependency files it did not read.** A `pyproject.toml` or `package.json` with no lockfile, a requirements file with no pinned versions, or a file the scanners passed over is listed under **Unread** with the reason, one line per component, and in `report.json` under `dependencyFiles`. Covers `sca` and `licenses`. ([#1202](https://github.com/draugr-dev/draugr/issues/1202))
+
+- **govulncheck runs on an air-gapped runner.** `draugr feeds update govulndb` downloads the Go vulnerability database into `~/.draugr/feeds`, and a scan passes it to govulncheck once its age is within `config.exploitability.maxAge` and its index lists modules. A refused copy is never read. Online, the scan queries `vuln.go.dev` and warns; with `--offline`, the control reports an error.
+
+- **`trivyFs` options for dependencies Trivy skips by default.** `filePatterns` adds files such as `requirements-dev.txt`, `includeDevDeps` reports development dependencies for npm, Yarn and Gradle, and `detectionPriority: comprehensive` reads a range such as `flask>=0.12` as its minimum version.
+
+### Fixed
+
+- **A dependency finding names its package's own line in the lockfile.** It named the first line mentioning the package, which could be a comment such as `# via flask`, a parent's dependency list, or a longer name like `rack-test`. It now takes the line Trivy's parser records, and otherwise searches for the whole name outside comments.
+
+- **An offline scan no longer asks Maven Central about a `pom.xml`.** With `--offline`, Draugr now passes Trivy `--offline-scan`, so it reads the dependencies the pom declares without resolving them over the network.
+
+- **`draugr init` writes `controls:`.** It wrote `controllers:`, the older name for the same key, which still loads.
+
+- **Every example in the guides and the descriptor reference is one the CLI accepts.** Code scanning, Azure Pipelines, the `draugr-api` reference and the reports guide showed `config.reports`, which the CLI refuses; each now names its reports on the publisher, or leaves them out where the destination renders its own.
+
+- **gosec and govulncheck analyze every Go module in a repository.** gosec ran once from the root, so a module below it was never analyzed and `sast` passed. It now runs per module. Each govulncheck verdict is located at its own module's `go.mod`, so a module that only requires a dependency is no longer marked reachable by another that calls it.
+
+- **Semgrep rules from a local `config` keep the id their file declares.** Semgrep prefixed each id with the rules file's directory, so the same rule had a different id on every machine and an exclusion or `draugr diff` baseline written on one missed on another.
+
+- **The `iac` control runs with `--offline`.** Draugr passed `trivy config` the vulnerability database's `--skip-db-update`, which it refuses, so every offline run reported `iac` as an error. It now passes `--skip-check-update`, and Trivy evaluates the checks built into the pinned release.
+
+## [0.132.0] - 2026-09-24
+
+### Added
+
+- **A run records who its CI system reports as having started the pipeline and who wrote the commit**, each as a handle and the platform's stable id. Email addresses are recorded only with `config.ci.recordEmail`. ([#1167](https://github.com/draugr-dev/draugr/issues/1167))
+
+### Changed
+
+- **A repository has one name however it was cloned.** `https://…/api`, `https://…/api.git` and `git@…:api.git` are now one repository in reports and in `draugr diff`, as are the HTTPS, SSH and `visualstudio.com` forms of an Azure DevOps repository. Moving CI to a deploy key no longer reports every finding as new and every old one as fixed.
+
+- **Breaking: every value a descriptor picks from a list is lowercase.** `hosts[].type`, `spec.methods` and `infrastructure.kind` refuse `API`, `GET` and `Kubernetes`, and the error names the spelling to write. A label value must be a string, so YAML's `tier: 1` is written `tier: "1"`.
+
+### Fixed
+
+- **`hosts[].type` is validated.** `type: apii` is refused rather than scanned with the browser checks. An editor flags a duration or an image digest in the wrong form, such as `maxAge: 1d`, as `draugr validate` does.
+
+- **`report.json` written with `-o` records what produced the run.** It carries the descriptor, the CI job and the exploitability data the run was ranked against.
+
+- **`draugr validate` refuses a provenance `unmatched` value other than `observe`, `warn` or `fail`.** The schema also refuses an unknown key inside a signer and a `vexSources[].url` that is not http(s), so an editor flags them before a run.
+
+## [0.131.1] - 2026-09-23
+
+### Fixed
+
+- **A finding from the CSP page check names the origin within the width a terminal shows.** Each message opens `CSP blocks` rather than `Content-Security-Policy blocks`, so the default console view reads `CSP blocks script from https://cdn.example.com` instead of stopping before the origin.
+
+## [0.131.0] - 2026-09-23
+
+### Added
+
+- **A finding your scanner excluded by its own configuration is reported, marked, with the file the rule was written in.** A `.trivyignore` line removed the finding from the report entirely, which left an exclusion somebody made looking exactly like a finding nobody ever had. Reported alongside the two Draugr already carried, under `scanner exclusions` and never under `config.exclude`, because nobody signed it and it was not written where the descriptor's reviewers look. Trivy older than 0.53.0 cannot list what it excluded and scans as before.
+
+- **A report says which of two kinds a scanner's own exclusion was: `origin: tool` for a directive in the scanned file such as a `#nosec`, and `origin: scanner` for the scanner's own configuration such as a `.trivyignore` line.** They send you to different people, whoever committed the line or whoever owns that file, and both were reported as the first. Read from SARIF's own `kind` rather than guessed at.
+
+- **A suppression carries the file it was written in through SARIF as well as through `report.json`, so a consumer reading the SARIF can still say which file authorized each exclusion when a descriptor is split across several.**
+
+- **A finding in the HTML report opens to its full message.** A row with a shortened message is marked `more`; clicking anywhere on it, or pressing Enter on it, shows everything the scanner said in its place. It works without JavaScript, the report's search matches the whole message, and printing includes every message in full.
+
+- **The `headers` control checks a Content-Security-Policy against the page it protects.** For a browser host, Draugr reads the HTML the server returns and reports what the policy refuses on it: inline scripts, inline event handlers, inline styles, and scripts, stylesheets, images or fonts from origins the policy does not list. Each finding names the origins and the directive to add them to. A `Content-Security-Policy-Report-Only` policy is checked for what enforcing it would refuse. These findings are notes and never fail a security gate. Where the policy allows `'unsafe-inline'`, the finding now lists what on the page depends on it, or states that nothing does. ([#251](https://github.com/draugr-dev/draugr/issues/251))
+
+### Changed
+
+- **A repository is named the same way wherever a report names one: the forge kept, the scheme and any `.git` suffix dropped.** The row saying what was scanned dropped the forge, on the argument that every row carries the same one, which is false for the descriptor this block exists for, one reading from a forge and from a vendor's mirror had two rows differing only where the name had been cut. A checkout with no git remote says so beside the revision, rather than leaving a relative path to be read as a repository's name.
+
+- **`config.exclude` counts the files an exclusion came from once there are more than four of them, rather than naming every one.** How many files a descriptor is split across is your decision, so the named list had no end, and the line grew with it.
+
+- **Every hash a report prints says what kind it is.** The evidence block printed a commit, the digest of a descriptor file and the digest of the merged document, three different questions answered in the same eight characters of hex with only one of them named. A repository row reads `commit 1ca53fda`, a descriptor file reads `digest 3b0afb46b138`, and a fragment pinned to another repository reads `commit d6a7fb0a3f4b`.
+
+- **License findings state the obligation and stop.** A restricted license says what distributing it obliges you to do and that running it as a hosted service usually does not; an unidentified one says to read its terms before shipping it.
+
+- **The accepted section counts the scanner's own exclusions on one line named `scanner exclusions`, where it said `source directives` and counted only one of the two kinds.** Every row there now reads the same way, a name and a count, and the reference explains what the name covers.
+
+- **The evidence block says where each scanner came from and nothing else.** The row for a scanner Draugr did not install carried two clauses and a command, in a column where every other value is a fact about the run, and wrapped onto a second line to do it. It reads `semgrep 1.169.0 · found on PATH; Draugr can install a pinned build`, and `TRY` offers the command, which is where a scan puts the things to run next.
+
+### Fixed
+
+- **A finding excluded by a descriptor rule that named nobody was reported as one the scanner suppressed on its own.** A report says where each suppression came from, so a reader knows who to ask about it, and the three answers are different people: the descriptor's owner, the component's supplier, or whoever committed the line. The rule's origin is written into the report now rather than inferred from whether it carried a name, so a rule that recorded a reason and no signature is still a decision somebody made in the descriptor.
+
+- **A finding's fix now says what to do about it for the control that found it.** Every finding not about a package was told to change the code, including a signature from an unexpected identity, a missing server header and a host on a blocklist, none of which has code to change. A leaked secret now says to rotate the credential, because removing it from the code leaves it in history and still valid; a provenance finding says to find out what signed the image, to sign it in the build, or to declare a signer, depending on which of the three it is.
+
+- **A Go finding excluded with a `#nosec` comment is reported, marked, with the reason after the `--`.** gosec removes such a result from its output unless asked to keep it, and Draugr was not asking, so the finding did not reach the report at all: it read as a finding nobody had ever made, and the question asked of an exclusion later, who decided this was acceptable, had nothing to answer from. Runs on Go code may report more findings than the last one, all of them already accepted by somebody and none of them counted against the gate.
+
+- **The `dast` control and `draugr doctor` no longer report that Nuclei has no templates when the templates are on disk.** Nuclei reads the version of its template set from its own config, so a set copied or restored without that config reported a blank version, which Draugr read as no set: the control refused to run, and `doctor` said to download templates that were already there. A set whose version cannot be read is now used, and the scan says it is scanning a set of unknown age.
+
+- **Two scans of one descriptor list their repositories in the same order.** The order was the order the scanner jobs finished in, and those run concurrently, so the same run looked like a different one to anything comparing two reports as text. Measured over eight runs of a two-repository descriptor: three orderings before, one after.
+
+## [0.130.0] - 2026-09-22
+
+### Changed
+
+`draugr tools install` with no arguments installs what the descriptor in that directory needs, and says which descriptor it read. It installed every tool Draugr can provision, which for a small service is a dozen binaries where three would run, and each one is something to trust and keep patched. `--all` still installs everything and is now the only way to; a directory with no descriptor is told to run `draugr init`, name tools, or pass `--all`, rather than being given the dozen.
+
+### Fixed
+
+The install script, the README quickstart and the install guide now show the same first five minutes, and one that does not fetch nine scanners this project will never run. The script told you to run draugr init and then draugr tools install, which ignores the descriptor init had just written, and described that as provisioning the scanners your controls need.
+
+The README counted its own controls above the table listing them. A count of what is already on the page tells a reader what they can see, and goes wrong the day the list grows.
+
+## [0.129.0] - 2026-09-21
+
+### Added
+
+`draugr survey provenance` reads the signature on each image your descriptor declares and writes the `signers:` that would accept it. Writing one by hand means already knowing the identity a build signs with, and a job calling a reusable workflow is signed as that workflow's repository rather than as the caller, so the obvious value is the wrong one and it fails later as a mismatch rather than as a syntax error. It writes the exact identity and the exact image, never a pattern, and says which image each signer came from both on the way out and beside the value in the file.
+
+The HTML report says which component is failing. A table beside the controls gives each component its own verdict against the same gate, what the descriptor declared it to be, how its findings ranked, and whether anything went unscanned, which is the breakdown the terminal already printed and the shared copy dropped. Narrowing the findings to one component adds a strip above the list carrying that component's verdict, its bands and the controls it did not pass.
+
+The markdown report's component table names what each component was declared to be, so the exposure and criticality behind a band are in the summary a pull request comment carries.
+
+### Fixed
+
+A component nothing was able to scan no longer reads as passing in the markdown report. Its scans failed, so there were no findings to have, and a row of zeros beside the word "pass" claimed a result nothing established. Such a component now reads ERROR and the row says what went unexamined, which is what the terminal has printed for a while.
+
+One finding is a finding. The console, the markdown report, the differential report and the differential gate's own error each wrote `1 finding(s)` where a count could be one, a form nobody would write by hand which survives because the digit beside it is always right.
+
+The HTML report says which findings belong to no component in the same words as the terminal and the markdown summary. It explained the mechanism instead, in a sentence the other two did not carry.
+
+The issue raised when the integration suite fails on main described the suite as optional. It said the suite is skipped on a pull request that does not touch its paths and that a failure does not block a merge, both of which stopped being true when the suite became required and unconditional. The paragraph is the only thing on that page telling a reader how much a red main matters, and it was telling them it does not.
+
+## [0.128.0] - 2026-09-20
+
+### Added
+
+A hub page for every lever that makes a finding count smaller: what each one does to the number, and the order to reach for them in. Linked from the docs index between Prioritization and Surveyors.
+
+The `sca` control can rank a finding higher when the dependency it is in has been deprecated by its publisher or flagged as malicious, with `config.dependencyHealth.enabled: true`. Two statements move a finding and both name who made them; health scores are read as context and never change a band, and it never fails a build on its own. Off unless you switch it on, because a scan with it enabled sends the list of packages it found to deps.dev.
+
+### Fixed
+
+The HTML report's **Accepted** section now accounts for every finding it lists. It reported only the `config.exclude` count over a list that also held findings excused by a supplier's VEX document and findings silenced by a comment in the source, so the number under-reported the rows beneath it. Each row now names which of the three set it aside, and a source directive no longer appears among this project's own decisions as an unattributed acceptance.
+
+`draugr doctor` asks each control what it would run rather than working it out beside it, so it no longer demands a tool a scan will never reach for. The `provenance` control picks its verifier per image from the matched signer's trust model, and a descriptor with no `x509:` signer never runs `notation` however its scanner blocks read, so doctor reported a missing tool and a control that could not run when it could.
+
+The integration suite is a required check and runs on every pull request. It used to be advisory, and filtered to a list of paths that named the packages rendering an answer and not the ones producing it, so a change to what a control records could merge with every required check green and leave `main` red. Being required and running unconditionally are one decision: a required check that is skipped is never reported, and a branch waiting on a report that will not arrive cannot merge. A pull request whose diff is only prose, pictures or release notes still reports in seconds rather than spending several minutes on a cluster, and what counts as inert is a short list of things a Go test, a scanner and a build cannot read, so anything new runs by default. A red suite on `main` raises an issue and closes it when the suite is green again, because a merge race, the nightly run and an upstream image that moved are all ways the branch goes red when nobody is looking at a checks page.
+
 ## [0.127.0] - 2026-09-18
 
 ### Changed
@@ -5811,7 +5969,15 @@ First public preview of Draugr.
 - **Early preview** — the CLI and the Saga schema may change before 1.0.
 - Requires **Trivy** on your `PATH` (and `git` for repository scans).
 
-[Unreleased]: https://github.com/draugr-dev/draugr/compare/v0.127.0...HEAD
+[Unreleased]: https://github.com/draugr-dev/draugr/compare/v0.134.0...HEAD
+[0.134.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.134.0
+[0.133.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.133.0
+[0.132.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.132.0
+[0.131.1]: https://github.com/draugr-dev/draugr/releases/tag/v0.131.1
+[0.131.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.131.0
+[0.130.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.130.0
+[0.129.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.129.0
+[0.128.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.128.0
 [0.127.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.127.0
 [0.126.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.126.0
 [0.125.0]: https://github.com/draugr-dev/draugr/releases/tag/v0.125.0

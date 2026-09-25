@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -15,7 +16,9 @@ import (
 	"errors"
 
 	"github.com/draugr-dev/draugr/internal/builtins"
+	"github.com/draugr-dev/draugr/internal/sagatest"
 	"github.com/draugr-dev/draugr/internal/scanpolicy"
+	"github.com/draugr-dev/draugr/pkg/engine"
 	"github.com/draugr-dev/draugr/pkg/norn"
 	"github.com/draugr-dev/draugr/pkg/plugin"
 	"github.com/draugr-dev/draugr/pkg/saga"
@@ -1283,6 +1286,8 @@ func TestSurveyedDescriptorValidates(t *testing.T) {
 	if !v.Valid {
 		t.Errorf("the descriptor a survey returned does not validate: %s\n%s", v.Error, out.Saga)
 	}
+	// And an editor opening the file the assistant writes accepts it too.
+	sagatest.EditorAccepts(t, []byte(out.Saga), false)
 }
 
 // TestSurveySaysWhatItCouldNotReach. A descriptor missing half a cluster looks exactly like one
@@ -1413,5 +1418,24 @@ func TestSurveyIsNotServedWithoutSurveyors(t *testing.T) {
 		if slices.Contains(got, name) {
 			t.Errorf("%s was served with no surveyor registry: %v", name, got)
 		}
+	}
+}
+
+// Two components, and a file two controls missed: named once per component with both controls,
+// and the same path in the other component kept apart.
+func TestUnreadFilesNamesEachFileOncePerComponent(t *testing.T) {
+	lock := engine.UnreadInput{Repository: "https://example.com/api", Path: "pyproject.toml", Reason: "no lockfile"}
+	got := unreadFiles([]engine.InputCoverage{
+		{Component: "api", Control: "licenses", Read: 1, Unread: []engine.UnreadInput{lock}},
+		{Component: "api", Control: "sca", Read: 1, Unread: []engine.UnreadInput{lock}},
+		{Component: "worker", Control: "sca", Read: 2, Unread: []engine.UnreadInput{lock}},
+		{Component: "web", Control: "sca", Read: 1},
+	})
+	want := []UnreadFile{
+		{Component: "api", Repository: lock.Repository, Path: "pyproject.toml", Reason: "no lockfile", Controls: []string{"licenses", "sca"}},
+		{Component: "worker", Repository: lock.Repository, Path: "pyproject.toml", Reason: "no lockfile", Controls: []string{"sca"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("unreadFiles =\n%+v\nwant\n%+v", got, want)
 	}
 }

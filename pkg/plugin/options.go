@@ -30,6 +30,12 @@ type Option struct {
 	// `fail` are three words that each name a policy, and an editor offering the three with no
 	// gloss has told somebody the spelling and nothing else.
 	Meanings map[string]string `json:"meanings,omitempty"`
+	// Pattern is the regular expression a string value must match, when the schema gives one.
+	Pattern string `json:"pattern,omitempty"`
+	// Schema is the option's declared JSON Schema, exactly as the plugin wrote it, nested items and
+	// closed objects included. The Saga schema publishes this rather than a summary of it, so an
+	// editor holds a descriptor to the same rules ValidateConfig does.
+	Schema json.RawMessage `json:"-"`
 }
 
 // Options reports the settings a scanner accepts, sorted by name, from its declared ConfigSchema.
@@ -48,6 +54,7 @@ func Options(schema json.RawMessage) []Option {
 			Type        string `json:"type"`
 			Description string `json:"description"`
 			Enum        []any  `json:"enum"`
+			Pattern     string `json:"pattern"`
 			// ReadOnly marks a key a controller writes into the job config and a descriptor may
 			// not. The scanner declares it because the engine holds a job's config to this
 			// schema; it is not something anybody chooses, so it is not offered as an option.
@@ -69,6 +76,10 @@ func Options(schema json.RawMessage) []Option {
 	if err := json.Unmarshal(schema, &node); err != nil {
 		return nil
 	}
+	var raw struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	_ = json.Unmarshal(schema, &raw) // the same document, which just decoded
 	required := make(map[string]bool, len(node.Required))
 	for _, r := range node.Required {
 		required[r] = true
@@ -83,6 +94,8 @@ func Options(schema json.RawMessage) []Option {
 			Type:        prop.Type,
 			Description: prop.Description,
 			Required:    required[name],
+			Pattern:     prop.Pattern,
+			Schema:      raw.Properties[name],
 		}
 		// An array constrains its elements; a scalar constrains itself. Either way these are the
 		// values the option accepts, which is the question a caller is asking.

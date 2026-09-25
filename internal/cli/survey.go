@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/draugr-dev/draugr/internal/builtins"
+	"github.com/draugr-dev/draugr/internal/english"
 	"github.com/draugr-dev/draugr/internal/surfaces"
 	"github.com/draugr-dev/draugr/internal/surveyors"
 	"github.com/draugr-dev/draugr/pkg/plugin"
@@ -97,7 +98,7 @@ func newSurveyCommand() *cobra.Command {
 
 	cmd.PersistentFlags().StringVarP(&opts.output, "output", "o", "", "write the Saga here (default stdout)")
 	cmd.PersistentFlags().StringVar(&opts.name, "name", "", "project name for a newly created Saga")
-	cmd.PersistentFlags().StringVar(&opts.version, "version", "0.0.0", "release version for a newly created Saga")
+	cmd.PersistentFlags().StringVar(&opts.version, "version", "", "release version for a newly created Saga (omitted when empty)")
 	cmd.PersistentFlags().BoolVar(&opts.replace, "replace", false,
 		"overwrite the Saga at --output instead of adding to it")
 	cmd.PersistentFlags().BoolVar(&opts.fragment, "fragment", false,
@@ -110,7 +111,8 @@ func newSurveyCommand() *cobra.Command {
 	}
 
 	cmd.AddCommand(newSurveyK8sCommand(opts), newSurveyGitHubCommand(opts),
-		newSurveyGitLabCommand(opts), newSurveyAzureCommand(opts))
+		newSurveyGitLabCommand(opts), newSurveyAzureCommand(opts),
+		newSurveyProvenanceCommand(opts))
 	return cmd
 }
 
@@ -382,6 +384,9 @@ func runSurvey(ctx context.Context, opts surveyOptions, requests []surveyor.Requ
 	if note := proposedExposureNote(proposedExposures(frag, settled)); note != "" {
 		_, _ = fmt.Fprintln(os.Stderr, note)
 	}
+	if note := adoptedSignerNote(frag); note != "" {
+		_, _ = fmt.Fprintln(os.Stderr, note)
+	}
 
 	out, err := saga.Marshal(&model)
 	if err != nil {
@@ -395,6 +400,9 @@ func runSurvey(ctx context.Context, opts surveyOptions, requests []surveyor.Requ
 	// carried keeps its own value, and commenting that would describe somebody's decision as a
 	// guess.
 	if out, err = saga.AnnotateExposures(out, proposedReasons(frag, settled)); err != nil {
+		return err
+	}
+	if out, err = saga.AnnotateSigners(out, frag.SignerReasons); err != nil {
 		return err
 	}
 	if opts.output != "" {
@@ -416,11 +424,15 @@ func runSurvey(ctx context.Context, opts surveyOptions, requests []surveyor.Requ
 
 // surveyIntoFragment writes what a survey found as a Saga fragment rather than a whole descriptor.
 //
-// A fragment is components and nothing else. It carries no `release:`. It is not a thing to be
-// released, it is part of one, and no `config.controllers`, because FragmentConfig deliberately
-// cannot express them: the descriptor that includes a fragment decides what to run against it.
-// That is the point of the option, for a team that owns a namespace and hands its surface to a
+// A fragment carries no `release:`. It is not a thing to be released, it is part of one. It
+// enables no controls either, because the descriptor that includes it decides what to run against
+// it, which is the point of the option for a team that owns a namespace and hands its surface to a
 // descriptor somebody else maintains.
+//
+// What it may carry is the short list of settings on FragmentControlOptions, and those travel:
+// `provenance.signers` is on that list because who signs what is the policy an organization writes
+// once and includes everywhere. A surveyor that proposed them into a fragment that dropped them
+// would report a successful survey and write a file with nothing in it.
 func surveyIntoFragment(opts surveyOptions, frag saga.Fragment, stdout io.Writer) error {
 	base, err := baseFragment(opts)
 	if err != nil {
@@ -432,6 +444,7 @@ func surveyIntoFragment(opts surveyOptions, frag saga.Fragment, stdout io.Writer
 	for _, c := range frag.Components {
 		base.Components = saga.UpsertComponent(base.Components, c)
 	}
+	saga.AppendFragmentControls(&base.Config, frag.Config.Controls)
 	reportNarrowed(narrowed)
 	// Said once, because its absence is the one difference from a Saga a reader would otherwise
 	// have to work out from an empty file. A fragment enabling controls would be a fragment
@@ -441,12 +454,18 @@ func surveyIntoFragment(opts surveyOptions, frag saga.Fragment, stdout io.Writer
 	if note := proposedExposureNote(proposedExposures(frag, settled)); note != "" {
 		_, _ = fmt.Fprintln(os.Stderr, note)
 	}
+	if note := adoptedSignerNote(frag); note != "" {
+		_, _ = fmt.Fprintln(os.Stderr, note)
+	}
 
 	out, err := saga.Marshal(&base)
 	if err != nil {
 		return err
 	}
 	if out, err = saga.AnnotateExposures(out, proposedReasons(frag, settled)); err != nil {
+		return err
+	}
+	if out, err = saga.AnnotateSigners(out, frag.SignerReasons); err != nil {
 		return err
 	}
 	if opts.output != "" {
@@ -573,20 +592,20 @@ func surveySummary(opts surveyOptions, frag saga.Fragment, components []saga.Com
 		hosts += len(c.Hosts)
 		infra += len(c.Infrastructure)
 	}
-	parts := []string{plural(len(components), "component")}
+	parts := []string{english.Count(len(components), "component")}
 	for _, p := range []struct {
 		n    int
 		noun string
 	}{{repos, "repository"}, {images, "image"}, {hosts, "host"}, {infra, "infrastructure target"}} {
 		if p.n > 0 {
-			parts = append(parts, plural(p.n, p.noun))
+			parts = append(parts, english.Count(p.n, p.noun))
 		}
 	}
 
 	line := fmt.Sprintf("%s %s · %s", verb, opts.output, strings.Join(parts, ", "))
 	// On a merge the total says little on its own; the reader wants to know what this run added.
 	if merged {
-		line += fmt.Sprintf(" (this survey found %s)", plural(len(frag.Components), "component"))
+		line += fmt.Sprintf(" (this survey found %s)", english.Count(len(frag.Components), "component"))
 	}
 	if len(components) == 0 {
 		// A descriptor describing nothing is almost always a scope or credentials problem, and
@@ -594,20 +613,6 @@ func surveySummary(opts surveyOptions, frag saga.Fragment, components []saga.Com
 		line += ", nothing was discovered, so this descriptor scans nothing"
 	}
 	return line
-}
-
-// plural renders a count with its noun, pluralised the way English mostly manages.
-//
-// The -y → -ies rule only applies after a consonant: "repository" becomes "repositories" and
-// "day" becomes "days".
-func plural(n int, noun string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, noun)
-	}
-	if stem, ok := strings.CutSuffix(noun, "y"); ok && stem != "" && !strings.ContainsRune("aeiou", rune(stem[len(stem)-1])) {
-		return fmt.Sprintf("%d %sies", n, stem)
-	}
-	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // mergesInto reports whether this run adds to an existing descriptor rather than writing a new
@@ -633,4 +638,33 @@ func baseModel(opts surveyOptions) (saga.Model, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// adoptedSignerNote says which identities a survey is now trusting, and on whose word.
+//
+// Every other surveyor writes facts: these images exist, these repositories exist. A signer is a
+// policy, and one derived from what currently signs an image cannot fail the check it was derived
+// from. That is the right thing to write, because the value was never confirming today's signature
+// but noticing tomorrow's being different, and it is only worth anything if the first observation
+// was a good one. So the moment of adoption is said out loud, where somebody can still disagree
+// with it.
+func adoptedSignerNote(frag saga.Fragment) string {
+	signers, _ := frag.Config.Controls["provenance"]["signers"].([]any)
+	if len(signers) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("signers adopted from what signs these images today, not confirmed. " +
+		"Read them before you rely on them:\n")
+	for _, raw := range signers {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := m["name"].(string)
+		keyless, _ := m["keyless"].(map[string]any)
+		identity, _ := keyless["identity"].(string)
+		fmt.Fprintf(&b, "  %s\n    %s\n    %s\n", name, identity, frag.SignerReasons[name])
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

@@ -152,6 +152,19 @@ func TestMarkdownRender(t *testing.T) {
 	}
 }
 
+// A release with no version is labeled by the project alone, with nothing dangling after it.
+func TestMarkdownNamesAReleaseWithNoVersion(t *testing.T) {
+	d := sampleData()
+	d.Release = saga.Release{}
+	var b bytes.Buffer
+	if err := (markdownReporter{}).Render(&b, d); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "**Release:** app\n") {
+		t.Errorf("want the release named by the project alone:\n%s", b.String())
+	}
+}
+
 func TestHTMLRender(t *testing.T) {
 	var b bytes.Buffer
 	if err := (htmlReporter{}).Render(&b, sampleData()); err != nil {
@@ -768,11 +781,13 @@ func mixedAcceptanceData() Data {
 					res("CVE-OURS", sarif.OriginSaga, "we pinned the upstream host"),
 					res("CVE-SUPPLIER", sarif.OriginVEX, "the vendor says the path is unreachable"),
 					res("CVE-COMMENT", sarif.OriginTool, "nosem"),
+					res("CVE-IGNOREFILE", sarif.OriginScanner, ".trivyignore"),
 				}}},
 			},
 			Suppressed: 1,
 			Imported:   1,
-			Silenced:   1,
+			// Both of the scanner's own, which is what the one count covers.
+			Silenced: 2,
 		},
 		Verdict: norn.Result{Verdict: norn.Pass},
 	}
@@ -782,8 +797,10 @@ func mixedAcceptanceData() Data {
 // checks the number rather than the rows and leaves believing the smaller figure.
 //
 // Three authorities can set a finding aside and they answer an auditor differently: this project
-// decided, a supplier asserts, or whoever was editing the file wrote a comment. A report that
-// attributes all three to `config.exclude` claims the project accepted things it never saw.
+// decided, a supplier asserts, or the scanner did it on its own. A report that attributes all of
+// them to `config.exclude` claims the project accepted things it never saw. The scanner's own
+// splits again on the row, between a directive in the file and its own configuration, because
+// those are two different people to go and ask.
 func TestTheAcceptedSectionAccountsForEveryFindingItLists(t *testing.T) {
 	r, err := For("html")
 	if err != nil {
@@ -796,16 +813,16 @@ func TestTheAcceptedSectionAccountsForEveryFindingItLists(t *testing.T) {
 	out := b.String()
 
 	// Everything set aside is listed, whoever set it aside.
-	for _, id := range []string{"CVE-OURS", "CVE-SUPPLIER", "CVE-COMMENT"} {
+	for _, id := range []string{"CVE-OURS", "CVE-SUPPLIER", "CVE-COMMENT", "CVE-IGNOREFILE"} {
 		if !strings.Contains(out, id) {
 			t.Errorf("%s is not in the report at all, so it was dropped rather than accepted", id)
 		}
 	}
-	// And the note over that list accounts for all three rather than for one.
+	// And the note over that list accounts for all of them rather than for one.
 	for _, want := range []string{
 		"1 finding suppressed",
 		"1 finding excused",
-		"1 finding silenced",
+		"2 findings suppressed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the accepted note does not say %q, so the count under-reports what is listed "+
@@ -814,7 +831,7 @@ func TestTheAcceptedSectionAccountsForEveryFindingItLists(t *testing.T) {
 	}
 	// Each row says which authority set it aside. Without that a supplier's assertion reads as a
 	// decision this project made, which is the one thing the separate counts exist to prevent.
-	for _, want := range []string{"config.exclude", "VEX", "source directive"} {
+	for _, want := range []string{"config.exclude", "VEX", "source directive", "scanner config"} {
 		if !strings.Contains(acceptedSection(out), want) {
 			t.Errorf("no row attributes a finding to %q:\n%s", want, acceptedSection(out))
 		}
@@ -1082,8 +1099,8 @@ func TestMarkdownRendersTheComponentTable(t *testing.T) {
 	got := b.String()
 	for _, want := range []string{
 		"### Components",
-		"| payments | **FAIL** | 3 | 2 | 1 | 0 | sca, secrets |",
-		"| internal-tool | pass | 0 | 0 | 0 | 0 | - |",
+		"| payments | - | **FAIL** | 3 | 2 | 1 | 0 | sca, secrets |",
+		"| internal-tool | - | pass | 0 | 0 | 0 | 0 | - |",
 		"2 findings not tied to a component",
 	} {
 		if !strings.Contains(got, want) {
@@ -1513,20 +1530,23 @@ func TestRepositoryRowsReadAsAClauseNotAnAlarm(t *testing.T) {
 	// One row per repository, because this is the block that grows without bound: a component may
 	// hold several and a descriptor many components.
 	got := repositoryRows([]RepositoryProvenance{{URL: ".", Revision: "abc123def456"}})
-	if len(got) != 1 || got[0] != [2]string{".", "abc123de"} {
+	if len(got) != 1 || got[0] != [2]string{".", "commit abc123de · no git remote"} {
 		t.Errorf("got %q", got)
 	}
-	// The host goes: every row carries the same one, and the path is what tells them apart.
-	got = repositoryRows([]RepositoryProvenance{{URL: "https://github.com/acme/api", Revision: "abc123def456"}})
-	if len(got) != 1 || got[0][0] != "acme/api" {
+	// The forge stays: a descriptor reading from a forge and from a vendor's mirror has two rows
+	// that differ only there, and the suffix goes because one repository is one repository.
+	got = repositoryRows([]RepositoryProvenance{{URL: "https://github.com/acme/api.git", Revision: "abc123def456"}})
+	if len(got) != 1 || got[0][0] != "github.com/acme/api" {
 		t.Errorf("got %q", got)
 	}
-	got = repositoryRows([]RepositoryProvenance{{URL: ".", Revision: "abc123def456", Uncommitted: 7}})
-	if len(got) != 1 || got[0][1] != "abc123de · 7 uncommitted files not included" {
+	got = repositoryRows([]RepositoryProvenance{
+		{URL: "https://github.com/acme/api", Revision: "abc123def456", Uncommitted: 7}})
+	if len(got) != 1 || got[0][1] != "commit abc123de · 7 uncommitted files not included" {
 		t.Errorf("got %q", got)
 	}
 	// One file is one file. A report that says "1 uncommitted files" was written by a program.
-	got = repositoryRows([]RepositoryProvenance{{URL: ".", Revision: "abc123def456", Uncommitted: 1}})
+	got = repositoryRows([]RepositoryProvenance{
+		{URL: "https://github.com/acme/api", Revision: "abc123def456", Uncommitted: 1}})
 	if !strings.Contains(got[0][1], "1 uncommitted file ") {
 		t.Errorf("got %q", got)
 	}
@@ -1555,16 +1575,23 @@ func TestRepositoryRowSaysWhenTheTreeIsNotReproducible(t *testing.T) {
 	// The committed row and the working-tree row describe opposite situations with the same
 	// number: one counts what is missing, the other counts what is uniquely there.
 	working := repositoryRows([]RepositoryProvenance{{
-		URL: ".", Revision: "abc123def456", Uncommitted: 2, WorkingTree: true,
+		URL: "https://github.com/acme/api", Revision: "abc123def456", Uncommitted: 2, WorkingTree: true,
 	}})
-	if len(working) != 1 || working[0][1] != "working tree abc123de+ · 2 uncommitted files, not reproducible" {
+	if len(working) != 1 || working[0][1] != "commit abc123de+ · working tree · 2 uncommitted files, not reproducible" {
 		t.Errorf("got %q", working)
 	}
 	committed := repositoryRows([]RepositoryProvenance{{
+		URL: "https://github.com/acme/api", Revision: "abc123def456", Uncommitted: 2,
+	}})
+	if committed[0][1] != "commit abc123de · 2 uncommitted files not included" {
+		t.Errorf("got %q", committed)
+	}
+	// A checkout with no remote carries both clauses: why it has no name, and what is not in it.
+	local := repositoryRows([]RepositoryProvenance{{
 		URL: ".", Revision: "abc123def456", Uncommitted: 2,
 	}})
-	if committed[0][1] != "abc123de · 2 uncommitted files not included" {
-		t.Errorf("got %q", committed)
+	if local[0][1] != "commit abc123de · no git remote · 2 uncommitted files not included" {
+		t.Errorf("got %q", local)
 	}
 }
 
@@ -1777,9 +1804,14 @@ func TestSilencedFindingsGetTheirOwnLine(t *testing.T) {
 	if !strings.Contains(line, "3") {
 		t.Errorf("line = %q, want the count", line)
 	}
-	// The reader has to be able to tell this apart from a decision somebody signed.
-	if !strings.Contains(line, "nobody signed") {
-		t.Errorf("line = %q, want it to say nobody signed these", line)
+	// The reader has to be able to tell this apart from a decision somebody signed, and what tells
+	// them is the row's own name. Every row here reads `<where>: <count>`, so the count says how
+	// many and the name says whose, rather than the row arguing its own case in a clause.
+	if !strings.HasPrefix(line, "scanner exclusions: ") {
+		t.Errorf("line = %q, want it named for where the exclusion lives", line)
+	}
+	if strings.Contains(line, "nobody") || strings.Contains(line, "weakest") {
+		t.Errorf("line = %q, want the count and the name; the argument belongs in the docs", line)
 	}
 }
 
@@ -1872,5 +1904,121 @@ func TestEveryFormatSaysWhatItIsFor(t *testing.T) {
 		if _, ok := reporters[f]; !ok {
 			t.Errorf("formatSummaries describes %q, which this build does not render", f)
 		}
+	}
+}
+
+// TestTheFixSaysWhereTheProblemLives. "Change the code" is an instruction somebody can carry out
+// only where the problem is in code they own. A signature mismatch, a server header, a cluster
+// setting and a host on a blocklist have none, and an instruction nobody can follow teaches a
+// reader that the column is not worth reading.
+func TestTheFixSaysWhereTheProblemLives(t *testing.T) {
+	for _, c := range []struct {
+		control, rule, want string
+	}{
+		{"sast", "python.lang.security.audit.eval", "change the code"},
+		{"iac", "DS-0002", "change the code"},
+		{"dast", "exposed-panel", "change the code"},
+		// Removed from the tip, a credential is still in history and still valid.
+		{"secrets", "aws-access-token", "rotate the credential"},
+		{"headers", "missing-csp", "change the server's configuration"},
+		{"headers", "headers/csp-blocks-inline-handler", "move it into a file, or allow it by hash"},
+		{"headers", "headers/csp-blocks-script-origin", "allow the origin, or stop loading from it"},
+		{"tls", "weak-cipher", "change the server's configuration"},
+		{"infrastructure", "cis/5.1.1", "change the cluster's configuration"},
+		{"threats", "urlhaus-listed", "stop contacting the host"},
+		// Three rules on one control, three different next steps.
+		{"provenance", "provenance-unexpected-identity", "find out what signed it before running it"},
+		{"provenance", "provenance-unsigned", "sign it in the build that publishes it"},
+		{"provenance", "provenance-not-covered", "declare a signer, or accept it unsigned"},
+		{"provenance", "a-rule-added-later", "check the signature"},
+	} {
+		got := fixPhrase(finding{control: c.control, ruleID: c.rule})
+		if got != c.want {
+			t.Errorf("%s %s: fix %q, want %q", c.control, c.rule, got, c.want)
+		}
+		if c.control != "sast" && c.control != "iac" && c.control != "dast" && got == "change the code" {
+			t.Errorf("%s has no code to change, and was told to change it", c.control)
+		}
+	}
+}
+
+// The breakdown under `config.exclude` names only files that are part of this descriptor.
+//
+// A suppression carries the file it was written in whoever wrote it, so a `.trivyignore` line and
+// a VEX document both have one. Counted beside the descriptor's fragments they read as rules this
+// project signed, and the breakdown sums to more than the count above it.
+func TestTheExclusionBreakdownCountsOnlyThisDescriptorsFiles(t *testing.T) {
+	res := func(rule, origin, source string) sarif.Result {
+		return sarif.Result{
+			RuleID: rule, Level: sarif.LevelError, Message: rule,
+			Suppression: &sarif.Suppression{Kind: "external", Origin: origin, Source: source},
+		}
+	}
+	d := Data{
+		Release: saga.Release{Version: "1.0"},
+		Run: engine.Result{
+			Controls: map[string]plugin.ControlResult{
+				"sca": {Control: "sca", Report: sarif.Report{Tool: "trivy", Results: []sarif.Result{
+					res("CVE-OURS", sarif.OriginSaga, "draugr.saga.yaml"),
+					res("CVE-FRAGMENT", sarif.OriginSaga, "security/exclusions.yaml"),
+					res("CVE-SUPPLIER", sarif.OriginVEX, "vex.json"),
+					res("CVE-IGNOREFILE", sarif.OriginScanner, ".trivyignore"),
+				}}},
+			},
+			Suppressed: 2, Imported: 1, Silenced: 1,
+		},
+		Verdict: norn.Result{Verdict: norn.Pass},
+	}
+	line := suppressionLine(d, true)
+	for _, unwanted := range []string{".trivyignore", "vex.json"} {
+		if strings.Contains(line, unwanted) {
+			t.Errorf("%q is counted under config.exclude:\n  %s", unwanted, line)
+		}
+	}
+	for _, want := range []string{"draugr.saga.yaml", "security/exclusions.yaml"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("%q is missing from the breakdown:\n  %s", want, line)
+		}
+	}
+}
+
+// A descriptor split across many files counts them rather than naming them all.
+//
+// How many fragments a descriptor has is the customer's decision, so the named list has no end a
+// reader can predict, and a line whose length somebody else chooses is a line that runs off the
+// terminal on the run that matters.
+func TestTheExclusionBreakdownStopsNamingFilesAndCountsThem(t *testing.T) {
+	build := func(n int) Data {
+		var results []sarif.Result
+		for i := range n {
+			results = append(results, sarif.Result{
+				RuleID: fmt.Sprintf("CVE-%d", i), Level: sarif.LevelError, Message: "x",
+				Suppression: &sarif.Suppression{
+					Kind: "external", Origin: sarif.OriginSaga,
+					Source: fmt.Sprintf("security/exclusions-%02d.yaml", i),
+				},
+			})
+		}
+		return Data{
+			Release: saga.Release{Version: "1.0"},
+			Run: engine.Result{
+				Controls:   map[string]plugin.ControlResult{"sca": {Control: "sca", Report: sarif.Report{Tool: "trivy", Results: results}}},
+				Suppressed: n,
+			},
+			Verdict: norn.Result{Verdict: norn.Pass},
+		}
+	}
+	// At the cap the files are still named, because that is a set somebody reads.
+	if line := suppressionLine(build(mostSourcesNamed), true); !strings.Contains(line, "exclusions-00.yaml") {
+		t.Errorf("%d files should still be named:\n  %s", mostSourcesNamed, line)
+	}
+	// Past it they are counted, and no file is named at all: naming some and not others would read
+	// as those being the only ones.
+	line := suppressionLine(build(mostSourcesNamed+1), true)
+	if strings.Contains(line, ".yaml") {
+		t.Errorf("past the cap no file should be named:\n  %s", line)
+	}
+	if !strings.Contains(line, fmt.Sprintf("across %d files", mostSourcesNamed+1)) {
+		t.Errorf("past the cap the line should count the files:\n  %s", line)
 	}
 }

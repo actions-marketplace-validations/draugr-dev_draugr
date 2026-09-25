@@ -18,7 +18,7 @@ type Model struct {
 	// Project is which project this descriptor describes, and the name a platform files its runs
 	// under. Lowercase letters, digits and dashes.
 	Project    string        `yaml:"project,omitempty"`
-	Release    Release       `yaml:"release"`
+	Release    Release       `yaml:"release,omitempty"`
 	Config     Config        `yaml:"config,omitempty"`
 	Components []Component   `yaml:"components,omitempty"`
 	Fragments  []FragmentRef `yaml:"fragments,omitempty"`
@@ -27,8 +27,11 @@ type Model struct {
 
 // Release identifies what is being assessed. Its version, and nothing else: what a release is
 // called is the project's name, and naming it twice let a descriptor state two.
+//
+// Optional. A version labels the reports and the VEX product identifier, and nothing a scan finds
+// or decides depends on it, so a descriptor without one scans the same code to the same verdict.
 type Release struct {
-	Version string `yaml:"version"`
+	Version string `yaml:"version,omitempty"`
 }
 
 // ProjectName is which project this descriptor describes.
@@ -101,6 +104,16 @@ type Config struct {
 	// ranked, and a decision that can move a finding across the gate belongs somewhere a team
 	// reviews rather than in a list of tools to run.
 	Reachability *ReachabilityConfig `yaml:"reachability,omitempty"`
+	// DependencyHealth ranks a finding up when the dependency it is in has been deprecated by its
+	// publisher or flagged as malicious, so a flaw in something nobody is maintaining outranks the
+	// same flaw in something that ships a fix next week.
+	//
+	// The third enrichment, and off unless asked for. The other two read a local cache; this one
+	// sends the list of packages a scan found to a third party, which is a disclosure a team should
+	// agree to in a pull request rather than discover in a proxy log.
+	DependencyHealth *DependencyHealthConfig `yaml:"dependencyHealth,omitempty"`
+	// CI sets what a run records about the continuous-integration job it ran in.
+	CI *CIConfig `yaml:"ci,omitempty"`
 	// AllowEffects acknowledges scanner effects that would otherwise stop a run, the kinds a scanner
 	// declares when it does more to a target than read it ("mutate", "privilege").
 	//
@@ -335,13 +348,43 @@ type ExploitabilityConfig struct {
 	// EPSS bump entirely, which is a thing someone might mean.
 	EPSSThreshold *float64 `yaml:"epssThreshold,omitempty"`
 	// MaxAge is how old a cached feed may be before "auto" refetches it and a scan warns that
-	// it is stale. Empty means the built-in default of 24 hours, which tracks EPSS being
+	// it is stale, and before govulncheck stops reading the local Go vulnerability database.
+	// Empty means the built-in default of 24 hours, which tracks EPSS being
 	// republished daily.
 	//
 	// Configurable because a runner deliberately pinned to a known copy of the data has a legitimate
 	// reason to say "do not tell me it is old", reproducing last quarter's verdict requires last
 	// quarter's feed.
 	MaxAge string `yaml:"maxAge,omitempty"`
+}
+
+// DependencyHealthConfig turns on ranking by what is known about a dependency itself.
+//
+// Two signals move a finding and both are statements by somebody who can be named: a package the
+// OSSF Malicious Packages Project has flagged, and a version its own publisher has deprecated.
+// Health *scores* are deliberately not used; see the package comment on `pkg/dephealth` for the
+// evidence against ranking on one.
+//
+// It never gates on its own. A dependency choice is not a defect, and a build that failed because
+// a maintainer walked away is a build people learn to route around.
+type DependencyHealthConfig struct {
+	// Enabled turns the signal on. False, or an omitted block, leaves it off.
+	//
+	// A field rather than the block's presence, because this one reaches the network and "I wrote
+	// the block to read what it would do" should not be the same act as "I agreed to send our
+	// dependency list to deps.dev".
+	Enabled bool `yaml:"enabled,omitempty"`
+}
+
+// CIConfig sets what a run records about the CI job it ran in.
+//
+// A run always records who the CI system reports as having started the pipeline and who wrote the
+// commit, as a handle and the platform's stable id. An email address is personal data, so it is
+// recorded only when asked for.
+type CIConfig struct {
+	// RecordEmail also records the email addresses the CI system reports for those two people.
+	// False, or an omitted block, reads no address at all.
+	RecordEmail bool `yaml:"recordEmail,omitempty"`
 }
 
 // ReachabilityConfig turns on reachability analysis and names the analyzers that do it.
@@ -495,18 +538,10 @@ type PublisherConfig struct {
 	Kind string `yaml:"kind"`
 	Dir  string `yaml:"dir,omitempty"` // file: output directory
 
-	// Reports narrows what this destination is given, and is where the two lists finally meet.
-	//
-	// Left out, a destination is handed every report `config.reports` renders, which is what a
-	// descriptor written before this meant and still means. That cross product is almost never
-	// what anybody wants: writing HTML and JSON to a directory while posting the markdown to a
-	// pull request was not expressible, so every destination got all three and picked out what it
-	// recognized.
-	//
-	// A format named here is rendered whether or not `config.reports` also names it, so a
-	// descriptor that publishes and keeps no local artifacts need not declare the same format
-	// twice. Rendering still happens once per distinct report, however many destinations ask for
-	// it.
+	// Reports names the formats this destination is given, beyond the ones its kind renders for
+	// itself. An entry naming one of those narrows it (`minPriority`, `filename`) rather than
+	// adding a second copy. Rendering happens once per distinct report, however many destinations
+	// ask for it.
 	Reports []ReportConfig `yaml:"reports,omitempty"`
 
 	// github / github-pr-comment: Repo defaults to $GITHUB_REPOSITORY; the token to $GITHUB_TOKEN
@@ -670,12 +705,14 @@ func (c Criticality) Valid() bool { return slices.Contains(Criticalities, c) }
 type Repository struct {
 	URL      string `yaml:"url"`
 	Revision string `yaml:"revision,omitempty"`
-	// Paths restricts the scan to these directories. Empty scans the whole repository.
+	// Paths restricts the scan to these directories and files. Empty scans the whole repository.
 	//
-	// Files at the repository root are always included regardless: manifests and the scanners' own
-	// configuration live there, and a tool that cannot see go.mod or .trivyignore does not fail. It
-	// reports less against a tree it did not fully understand, which is indistinguishable from a
-	// clean scan.
+	// A file at the repository root belongs to a component only when an entry names it. Components
+	// sharing a repository would otherwise each scan the root lockfile, Dockerfile and anything
+	// committed beside them, and report every finding there once per component. The scanners' own
+	// configuration at the root is the exception, kept for every component, because it decides how
+	// a tree is scanned rather than being part of one. An entry the repository does not hold is
+	// refused at checkout: it would narrow the scan to nothing and report the silence as clean.
 	Paths []string `yaml:"paths,omitempty"`
 	// Ignore removes matching paths from the scan, applied after Paths so it can carve out of
 	// one. Gitignore-style: a trailing `/` is a directory, `*` matches within a path segment,
@@ -801,10 +838,9 @@ type HostAuth struct {
 var InfrastructureKinds = []string{"kubernetes"}
 
 // ValidInfrastructureKind reports whether a kind is one Draugr audits.
+// The spelling the JSON Schema offers and no other, so an editor and `draugr validate` agree.
 func ValidInfrastructureKind(kind string) bool {
-	return slices.ContainsFunc(InfrastructureKinds, func(k string) bool {
-		return strings.EqualFold(k, kind)
-	})
+	return slices.Contains(InfrastructureKinds, kind)
 }
 
 // Infrastructure is an infrastructure surface. Kind is one of InfrastructureKinds; Ref names the
@@ -930,6 +966,14 @@ type Fragment struct {
 	// fragment somebody writes by hand has no use for it. It exists so a survey can put the
 	// reasoning beside the value it wrote, where the value gets reviewed.
 	ExposureReasons map[string]string `yaml:"-" json:"-"`
+	// SignerReasons explains, per signer name, which image's signature a proposed `signers:` entry
+	// was read from.
+	//
+	// Not serialized, for the same reason as ExposureReasons, and needed more. A signer is a
+	// statement about who is trusted to sign, so a reader reviewing one is being asked to accept a
+	// policy rather than to correct an inventory, and the question they have is which image this
+	// came off.
+	SignerReasons map[string]string `yaml:"-" json:"-"`
 	// Source names the file this fragment was read from, so what it contributes can be attributed
 	// to it. Set by the resolver, and empty for a fragment a surveyor built in memory.
 	//

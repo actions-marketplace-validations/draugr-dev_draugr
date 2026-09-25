@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/draugr-dev/draugr/internal/english"
 	"github.com/draugr-dev/draugr/pkg/engine"
 	"github.com/draugr-dev/draugr/pkg/norn"
 	"github.com/draugr-dev/draugr/pkg/sarif"
@@ -29,7 +30,17 @@ type htmlView struct {
 	Prioritized    bool
 	P1, P2, P3, P4 int
 	Controls       []htmlControl
-	Findings       []htmlFinding
+	// Components breaks the verdict down by the part of the application it belongs to.
+	//
+	// The controls table answers whether the project is shippable. A component is the unit a team
+	// owns and the unit exposure and criticality are declared on, so with several of them a failing
+	// control says the project has a problem and stops short of saying whose.
+	//
+	// Unattributed is how many findings belong to no component, because project-wide controls
+	// produce those and a table that omits them makes the parts look like the whole.
+	Components   []htmlComponent
+	Unattributed int
+	Findings     []htmlFinding
 	// Provenance is what each scanner said about its own run, the standard applied, how much of it
 	// was decided, what it was scoped to. A shared HTML report is the copy that reaches someone who
 	// did not run the scan, so it is the one that most needs to say what was measured rather than
@@ -114,6 +125,32 @@ type htmlTiming struct {
 
 type htmlError struct{ Control, Message string }
 
+// htmlComponent is one component's row: what it was declared to be, how its own findings ranked,
+// and what nothing was able to look at.
+type htmlComponent struct {
+	Name string
+	// Class is the exposure and criticality the descriptor declared, as one string, and empty
+	// where it declared neither. Half of why two components with the same finding hold different
+	// bands, and without it the difference between two rows has no visible cause.
+	Class   string
+	Verdict string // "PASS" | "FAIL" | "ERROR" | "not scanned"
+	Fail    bool
+	// Errored marks a component whose scans failed and which therefore found nothing in the sense
+	// that nothing was possible. Distinct from a pass, which this row must not be read as.
+	Errored bool
+	// Skipped marks a declared component this run's scope left out. Listed rather than omitted,
+	// because an absent row reads exactly like one that passed.
+	Skipped        bool
+	Prioritized    bool
+	P1, P2, P3, P4 int
+	Findings       int
+	Unscanned      string // "2/3 repositories not scanned", empty where everything was reached
+	// Failed names the controls this component did not pass. Carried for the strip and not for the
+	// table: which control failed is the next question once somebody has narrowed to one component,
+	// and a column of it across every row is a second controls table read sideways.
+	Failed []string
+}
+
 type htmlControl struct {
 	Control  string
 	Fail     bool
@@ -152,10 +189,12 @@ type htmlUnmatched struct {
 
 // fixPhrase says what to do about a finding, in one clause.
 //
-// Four answers, because there are four situations and a reader needs to tell them apart: there is
-// a release that ends it, there is no release yet, somebody else has to publish one, or the thing
-// to change is the code. The last covers every finding that is not about a package at all, which
-// a version column left blank.
+// For a package: there is a release that ends it, there is no release yet, or somebody else has to
+// publish one. For everything else the answer depends on where the problem lives, which is a
+// property of the control that found it. "Change the code" is right for a flaw in code somebody
+// owns and wrong everywhere else: a signature mismatch, a server header and a host on a blocklist
+// have no code to change, and an instruction nobody can carry out is worse than none, because it
+// teaches a reader that this column is not worth reading.
 func fixPhrase(f finding) string {
 	if f.pkg != nil && f.pkg.Name != "" {
 		if f.pkg.FixedVersion != "" {
@@ -172,8 +211,51 @@ func fixPhrase(f finding) string {
 	switch f.control {
 	case "sca", "images", "licenses":
 		return "no package reported"
+	case "provenance":
+		return provenanceFix(f.ruleID)
+	case "secrets":
+		// Removing it from the code leaves it in history and leaves it valid. The credential is the
+		// thing that leaked, so it is the thing to replace.
+		return "rotate the credential"
+	case "headers":
+		return headersFix(f.ruleID)
+	case "tls":
+		return "change the server's configuration"
+	case "infrastructure":
+		return "change the cluster's configuration"
+	case "threats":
+		return "stop contacting the host"
 	}
 	return "change the code"
+}
+
+// headersFix says what to do about a header finding. Most are the server's configuration; the
+// ones comparing the policy with its page have two fixes, the policy or the page, and which is
+// right depends on whether the content was meant to be there.
+func headersFix(rule string) string {
+	switch {
+	case strings.HasPrefix(rule, "headers/csp-blocks-inline-"):
+		return "move it into a file, or allow it by hash"
+	case strings.HasPrefix(rule, "headers/csp-blocks-"):
+		return "allow the origin, or stop loading from it"
+	}
+	return "change the server's configuration"
+}
+
+// provenanceFix says what to do about a signature finding. Three rules, three different next
+// steps, because the three situations share nothing but the control that noticed them.
+func provenanceFix(rule string) string {
+	switch rule {
+	case "provenance-unexpected-identity":
+		// Either a build moved to another workflow or the image is not what it claims. Both start
+		// with finding out which, and nothing should run this image until somebody has.
+		return "find out what signed it before running it"
+	case "provenance-unsigned":
+		return "sign it in the build that publishes it"
+	case "provenance-not-covered":
+		return "declare a signer, or accept it unsigned"
+	}
+	return "check the signature"
 }
 
 // firstFixedVersion is the release to move to, where a scanner named several.
@@ -192,6 +274,10 @@ func firstFixedVersion(fixed string) string {
 
 type htmlFinding struct {
 	Priority, Severity, SevClass, Score, RuleID, Control, Tool, Component, Location, Message string
+	// Full is the scanner's whole message, set only where Message had to be shortened to fit a
+	// row. The row opens to it, so the list stays one line per finding and nothing a scanner said
+	// is lost to the report.
+	Full string
 	// Upgrade is the dependency and the release that clears it, which is the only instruction on
 	// the row. Empty for a finding that is not about a package.
 	Upgrade string
@@ -282,6 +368,8 @@ func (htmlReporter) Render(w io.Writer, d Data) error {
 	for _, name := range s.errored {
 		view.Controls = append(view.Controls, htmlControl{Control: name, Errored: true, NoReport: true})
 	}
+	view.Components = htmlComponents(d, s)
+	view.Unattributed = d.UnattributedFindings
 	prio, sev, ctl, comp := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	for _, f := range s.findings {
 		hf := toHTMLFinding(f)
@@ -328,6 +416,60 @@ func (htmlReporter) Render(w io.Writer, d Data) error {
 	return htmlTemplate.Execute(w, view)
 }
 
+// htmlComponents is the per-component verdict the console prints, as table rows.
+//
+// The clean components are the point as much as the failing ones: a pass against a named component
+// is what somebody takes back to their team, and a shared report is the copy that reaches the
+// people who did not run the scan and cannot read it off the findings table by eye.
+func htmlComponents(d Data, s summary) []htmlComponent {
+	if len(d.Components) == 0 {
+		return nil
+	}
+	out := make([]htmlComponent, 0, len(d.Components))
+	for _, c := range d.Components {
+		row := htmlComponent{
+			Name: c.Name, Verdict: "PASS", Fail: c.Verdict == norn.Fail,
+			Class:       classification(c.Exposure, c.Criticality),
+			Prioritized: s.prioritized,
+			P1:          c.Priorities[0], P2: c.Priorities[1], P3: c.Priorities[2], P4: c.Priorities[3],
+			Findings: c.Findings,
+			Failed:   c.Controls,
+		}
+		if row.Fail {
+			row.Verdict = "FAIL"
+		}
+		// A component nothing was able to look at has not passed. Its scans failed, so "no
+		// findings" is true only in the sense that none were possible, which is the reading this
+		// row must not invite.
+		if len(c.Unscanned) > 0 {
+			row.Unscanned = unscannedDetail(c.Unscanned, c.Declared)
+			if c.Findings == 0 {
+				row.Verdict, row.Errored, row.Fail = "ERROR", true, false
+			}
+		}
+		out = append(out, row)
+	}
+	if d.Scope != nil {
+		for _, name := range d.Scope.SkippedComponents {
+			out = append(out, htmlComponent{Name: name, Verdict: "not scanned", Skipped: true})
+		}
+	}
+	return out
+}
+
+// classification renders what the descriptor declared a component to be, and nothing where it
+// declared neither half.
+func classification(exposure, criticality string) string {
+	switch {
+	case exposure != "" && criticality != "":
+		return exposure + " · " + criticality
+	case exposure != "":
+		return exposure
+	default:
+		return criticality
+	}
+}
+
 // htmlSignals is what argued with this run's ranking, named the way the console names it.
 //
 // One list rather than four scattered facts: an exploitation catalog, a prediction about one, a
@@ -344,13 +486,13 @@ func htmlSignals(d Data, s summary) []htmlSignal {
 		// feed changed nothing is to read every finding looking for a mark that is not there.
 		effect := "nothing raised"
 		if n > 0 {
-			effect = fmt.Sprintf("%s raised", plural(n, "finding"))
+			effect = fmt.Sprintf("%s raised", english.Count(n, "finding"))
 		}
 		out = append(out, htmlSignal{Name: strings.ToUpper(name), Effect: effect})
 	}
 	if n := s.floored; n > 0 {
 		out = append(out, htmlSignal{
-			Name: "floor", Effect: fmt.Sprintf("%s raised by a control's own rule", plural(n, "finding")),
+			Name: "floor", Effect: fmt.Sprintf("%s raised by a control's own rule", english.Count(n, "finding")),
 		})
 	}
 	rows, _ := reachabilityBlock(d)
@@ -411,11 +553,16 @@ func toHTMLFinding(f finding) htmlFinding {
 	if m := movedBy(f); m != nil {
 		moved = m.glyph + " " + m.label
 	}
+	title := findingTitle(f)
+	full := strings.Join(strings.Fields(f.message), " ")
+	if full == title {
+		full = ""
+	}
 	return htmlFinding{
 		Priority: dash(f.priority), Severity: string(sev), SevClass: "sev-" + string(sev),
 		Score: scoreStr(f), RuleID: f.ruleID, Control: f.control, Tool: dash(f.tool),
 		Component: dash(f.component),
-		Location:  dash(f.location), Message: findingTitle(f), HelpURI: f.helpURI,
+		Location:  dash(f.location), Message: title, Full: full, HelpURI: f.helpURI,
 		Upgrade:       upgradeLabel(f),
 		Fix:           fixPhrase(f),
 		Moved:         moved,
@@ -560,7 +707,8 @@ var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
 	// The same pluralization the console uses, so one finding is a finding here too. "1 finding(s)"
 	// is a sentence nobody would write by hand and the only reason it survives is that it is never
 	// read aloud.
-	"plural": plural,
+	"plural": english.Count,
+	"join":   func(items []string) string { return strings.Join(items, ", ") },
 }).Parse(htmlDoc))
 
 const htmlDoc = `<!doctype html>
@@ -856,6 +1004,22 @@ const htmlDoc = `<!doctype html>
   .sev.s-p4 { background: var(--p4); color: var(--on-p4); }
   .sev.off { background: transparent; color: var(--faint); border-color: var(--line); }
 
+  /* Components as a table, where the controls above them are rows: a reader compares components
+   * against each other and a control against the gate, and comparing means a column to run down.
+   * The same chips, because a component's bands and the strip in the header are one measurement. */
+  table.components th[scope="row"] { font-weight: 600; white-space: nowrap; }
+  table.components .sevs { display: inline-flex; margin-left: 0; vertical-align: middle; }
+  table.components td:nth-child(3) {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: .76rem; letter-spacing: .1em; white-space: nowrap;
+  }
+  .cls { color: var(--muted); white-space: nowrap; }
+  .none { color: var(--faint); font-style: italic; }
+  /* The gap sits under the bands rather than beside them. A component can be partly scanned and
+   * hold findings worth acting on, and either fact read alone is wrong. */
+  .gap { display: block; margin-top: .25rem; color: var(--p1); font-size: .82rem; }
+  tr.skipped th[scope="row"] { color: var(--muted); font-weight: 500; }
+
   /* What moved a band, beside the rating it moved. Muted: the row is already found by its band,
    * and the mark is the reason rather than the alarm. */
   .moved { color: var(--muted); font-size: .74rem; white-space: nowrap; }
@@ -902,6 +1066,8 @@ const htmlDoc = `<!doctype html>
   @media print {
     .fold > summary::before { display: none; }
     .fold > summary { cursor: default; }
+    #findings summary.rule::before { visibility: hidden; }
+    #findings .hint { display: none; }
   }
   /* The release that ends a finding wears the color a passing verdict wears, which is what the
    * console and the dashboard both do with this fact. */
@@ -927,6 +1093,36 @@ const htmlDoc = `<!doctype html>
   #findings .rule { line-height: 1.45; }
   #findings .rule .id { font-family: "JetBrains Mono", ui-monospace, monospace; font-weight: 600; }
   #findings .rule .said { color: var(--muted); }
+  /* A row whose message was shortened opens to the whole of it. A disclosure rather than a dialog:
+   * it needs no script, the search box already matches the whole message, printing opens it with
+   * every other fold, and the rows around it stay where they were. Open, the full message takes the summary's
+   * place rather than repeating it. */
+  /* The caret sits in a gutter, so a wrapped message, the full text and the context line all share
+   * the rule id's left edge. */
+  #findings .what { padding-left: 1em; }
+  #findings summary.rule { list-style: none; cursor: pointer; position: relative; }
+  #findings summary.rule::-webkit-details-marker { display: none; }
+  #findings summary.rule::before {
+    content: "\25B8"; position: absolute; left: -1em; color: var(--faint);
+    transition: transform .15s;
+  }
+  #findings details[open] > summary.rule::before { transform: rotate(90deg); }
+  #findings .f.opens { cursor: pointer; }
+  #findings .f.opens:hover { background: var(--surface); }
+  #findings .f.opens:hover summary.rule::before,
+  #findings .f.opens:hover .hint { color: var(--text); }
+  #findings .f.opens:hover .hint { border-color: var(--muted); }
+  #findings details[open] > summary .said,
+  #findings details[open] > summary .hint { display: none; }
+  /* Says the row opens, on every row that does, without hovering: a touch screen has no hover, and
+   * a report is often read by somebody who was sent it. Hidden from assistive technology, which
+   * already announces the summary as a collapsed disclosure. */
+  #findings .hint {
+    margin-left: .45rem; padding: .02rem .4rem; font-size: .7rem; white-space: nowrap;
+    vertical-align: .1em; color: var(--muted);
+    border: 1px solid var(--line-strong); border-radius: 999px;
+  }
+  #findings .full { margin: .25rem 0 .1rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
   /* The context line. Labeled in the vocabulary the rest of the product uses, and small, because
    * it answers "where" after the row has already answered "what". */
   #findings .sub {
@@ -1048,6 +1244,17 @@ const htmlDoc = `<!doctype html>
   /* What is on, beside what turns it off. A reader has to be able to see the state of the list
    * without opening a menu, and a filtered list nobody can tell is filtered is one somebody reads
    * as the whole set. */
+  /* The component the reader narrowed to, between the menus and the count. Above the list rather
+   * than in it, because it describes the whole of what is below and nothing in the list says it. */
+  .focus {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem .7rem;
+    padding: .5rem .75rem; margin: 0 0 .45rem;
+    border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: var(--radius); background: var(--surface);
+  }
+  .focus-name { font-weight: 600; }
+  .focus-verdict { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .76rem; letter-spacing: .1em; }
+  .focus-facts { color: var(--muted); font-size: .84rem; margin-left: auto; }
   .state { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .7rem; margin: 0 0 1rem; }
   .count { color: var(--faint); font-size: .82rem; }
   .tokens { display: flex; flex-wrap: wrap; gap: .3rem; }
@@ -1112,6 +1319,7 @@ const htmlDoc = `<!doctype html>
 <nav class="tabs" aria-label="Sections of this report">
   {{if .Signals}}<a class="tab" href="#signals">Signals</a>{{end}}
   {{if .Controls}}<a class="tab" href="#controls">Controls</a>{{end}}
+  {{if .Components}}<a class="tab" href="#components">Components</a>{{end}}
   {{if .Errors}}<a class="tab err" href="#errors">Errors</a>{{end}}
   <a class="tab" href="#findings-h">Findings</a>
   {{if or .Suppressed .Decisions .Unmatched .Excluded}}<a class="tab" href="#suppressed">Accepted</a>{{end}}
@@ -1178,6 +1386,41 @@ the component is, so the same issue ranks differently on a public API than on an
 </ul>
 </details>
 {{end}}
+{{if .Components}}
+<details class="fold" open><summary id="components"><span class="sec">Components</span></summary>
+<p class="note">The verdict for each part of the application on its own findings, under the same gate
+as the run.</p>
+<table class="components">
+<thead><tr>
+  <th scope="col">Component</th>
+  <th scope="col">Declared</th>
+  <th scope="col">Verdict</th>
+  <th scope="col">{{if .Prioritized}}Priority{{else}}Findings{{end}}</th>
+</tr></thead>
+<tbody>
+{{range .Components}}<tr{{if .Skipped}} class="skipped"{{end}}>
+  <th scope="row">{{.Name}}</th>
+  <td class="cls">{{if .Class}}{{.Class}}{{else}}<span class="none">not declared</span>{{end}}</td>
+  <td>{{if .Skipped}}<span class="none">not scanned</span>{{else if .Errored}}<span class="err">ERROR</span>{{else if .Fail}}<span class="err">FAIL</span>{{else}}<span class="ok">PASS</span>{{end}}</td>
+  <td>
+    {{if .Skipped}}
+    {{else if and .Prioritized .Findings}}<span class="sevs">
+      <span class="sev s-p1{{if not .P1}} off{{end}}">P1 {{.P1}}</span>
+      <span class="sev s-p2{{if not .P2}} off{{end}}">P2 {{.P2}}</span>
+      <span class="sev s-p3{{if not .P3}} off{{end}}">P3 {{.P3}}</span>
+      <span class="sev s-p4{{if not .P4}} off{{end}}">P4 {{.P4}}</span>
+    </span>
+    {{else if .Findings}}{{plural .Findings "finding"}}
+    {{else if not .Errored}}<span class="none">no findings</span>{{end}}
+    {{if .Unscanned}}<span class="gap">{{.Unscanned}}</span>{{end}}
+  </td>
+</tr>{{end}}
+</tbody>
+</table>
+{{if .Unattributed}}<p class="note">{{plural .Unattributed "finding"}} not tied to a component
+(project-wide controls).</p>{{end}}
+</details>
+{{end}}
 
 {{if .Errors}}
 <h3 id="errors" class="err">Controls that could not run</h3>
@@ -1232,6 +1475,26 @@ about what they would have found. For everything the tool printed, re-run with
     {{template "menu" dict "K" "c" "Label" "Control" "Options" .ControlNames}}
     {{template "menu" dict "K" "m" "Label" "Component" "Options" .ComponentNames}}
   </div>
+  {{range .Components}}{{if not .Skipped}}
+  <div class="focus" data-m="{{.Name}}" hidden>
+    <span class="focus-name">{{.Name}}</span>
+    {{if .Class}}<span class="cls">{{.Class}}</span>{{end}}
+    <span class="focus-verdict">{{if .Errored}}<span class="err">ERROR</span>{{else if .Fail}}<span class="err">FAIL</span>{{else}}<span class="ok">PASS</span>{{end}}</span>
+    {{if and .Prioritized .Findings}}<span class="sevs">
+      <span class="sev s-p1{{if not .P1}} off{{end}}">P1 {{.P1}}</span>
+      <span class="sev s-p2{{if not .P2}} off{{end}}">P2 {{.P2}}</span>
+      <span class="sev s-p3{{if not .P3}} off{{end}}">P3 {{.P3}}</span>
+      <span class="sev s-p4{{if not .P4}} off{{end}}">P4 {{.P4}}</span>
+    </span>{{end}}
+    <span class="focus-facts">
+      {{/* The count only where the bands are not shown. With them it is their sum, and the line
+           under this one already says how many the filter left. */}}
+      {{if not (and .Prioritized .Findings)}}{{plural .Findings "finding"}}{{if or .Failed .Unscanned}} · {{end}}{{end}}
+      {{- if .Failed}}failing {{join .Failed}}{{if .Unscanned}} · {{end}}{{end}}
+      {{- if .Unscanned}}{{.Unscanned}}{{end}}
+    </span>
+  </div>
+  {{end}}{{end}}
   <p class="state">
     <span class="count" id="count"></span>
     <span class="tokens" id="tokens"></span>
@@ -1239,6 +1502,7 @@ about what they would have found. For everything the tool printed, re-run with
   </p>
 </div>
 
+{{define "rule"}}<span class="id">{{if .HelpURI}}<a href="{{.HelpURI}}">{{.RuleID}}</a>{{else}}{{.RuleID}}{{end}}</span>{{if .Message}}<span class="said"><span class="faint"> · </span>{{.Message}}</span>{{end}}{{end}}
 {{define "menu"}}
 <span class="menu-anchor">
   <button class="chip-menu" type="button" data-k="{{.K}}" aria-expanded="false" aria-haspopup="true">
@@ -1262,7 +1526,8 @@ about what they would have found. For everything the tool printed, re-run with
 {{range .Findings}}<div class="f" data-p="{{.Priority}}" data-s="{{.Severity}}" data-c="{{.Control}}" data-m="{{.Component}}" data-a="{{.ActionKey}}" data-q="{{.Search}}">
   <span class="chips"><span class="pri {{.Priority}}">{{.Priority}}</span><span class="{{.SevClass}}">{{.Severity}}</span></span>
   <div class="what">
-    <div class="rule"><span class="id">{{if .HelpURI}}<a href="{{.HelpURI}}">{{.RuleID}}</a>{{else}}{{.RuleID}}{{end}}</span>{{if .Message}}<span class="faint"> · </span><span class="said">{{.Message}}</span>{{end}}</div>
+    {{if .Full}}<details class="more"><summary class="rule">{{template "rule" .}}<span class="hint" aria-hidden="true">more</span></summary><p class="full">{{.Full}}</p></details>
+    {{- else}}<div class="rule">{{template "rule" .}}</div>{{end}}
     <div class="sub mono">{{if .Component}}<span class="lbl">component</span> {{.Component}}<span class="faint"> · </span>{{end}}{{if .Location}}{{.Location}}<span class="faint"> · </span>{{end}}<span class="lbl">scanner</span> {{.Tool}}{{if .Moved}}<span class="faint"> · </span><span class="moved">{{.Moved}}</span>{{end}}<span class="faint"> · </span><span class="lbl">fix</span> {{.Fix}}</div>
   </div>
 </div>{{end}}
@@ -1281,7 +1546,7 @@ about what they would have found. For everything the tool printed, re-run with
 <p class="note">
 {{- if .Suppressed}}<code class="cmd">config.exclude</code>: {{plural .Suppressed "finding"}} suppressed. {{end -}}
 {{- if .Imported}}VEX: {{plural .Imported "finding"}} excused. {{end -}}
-{{- if .Silenced}}Source directives: {{plural .Silenced "finding"}} silenced, and nobody signed them. {{end -}}
+{{- if .Silenced}}Scanner exclusions: {{plural .Silenced "finding"}} suppressed. {{end -}}
 {{- if not (or .Suppressed .Imported .Silenced)}}Set aside by <code class="cmd">config.exclude</code>.{{end -}}
 </p>
 {{if .Decisions}}
@@ -1463,6 +1728,20 @@ about what they would have found. For everything the tool printed, re-run with
   if (!tools || !rows.length) return;
   tools.hidden = false;
 
+  // The whole row opens its message, not only the line the disclosure owns. A link inside the row
+  // keeps its own meaning, the summary toggles itself natively, and a click that ends a text
+  // selection is somebody copying a path rather than asking for more.
+  rows.forEach(function (row) {
+    var more = row.querySelector("details.more");
+    if (!more) return;
+    row.classList.add("opens");
+    row.addEventListener("click", function (e) {
+      if (e.target.closest("a, summary")) return;
+      if (String(window.getSelection && window.getSelection()) !== "") return;
+      more.open = !more.open;
+    });
+  });
+
   // Two views of one set. "What to do" leads, the list sits behind the toggle, and the headings
   // that separate them without scripts are dropped because the toggle now names them.
   var views = document.getElementById("views");
@@ -1579,12 +1858,22 @@ about what they would have found. For everything the tool printed, re-run with
       badge.hidden = !n;
       button.classList.toggle("on", n > 0);
     });
+    focus(m);
     a11yRows();
     tokens();
     count.textContent = shown === rows.length
       ? shown + (shown === 1 ? " finding" : " findings")
       : "showing " + shown + " of " + rows.length;
     none.hidden = shown > 0;
+  }
+
+  // What the reader narrowed to, said once above the list they narrowed. Only for a single
+  // component: the facts on it are that component's verdict, its failing controls and its gaps,
+  // and there is no such thing for two, because a strip averaging them is a number nothing holds.
+  var strips = Array.prototype.slice.call(document.querySelectorAll(".focus"));
+  function focus(m) {
+    var only = m && m.length === 1 ? m[0] : "";
+    strips.forEach(function (el) { el.hidden = el.dataset.m !== only; });
   }
 
   function a11yRows() {

@@ -24,11 +24,12 @@ entry](../../docs/reference/glossary.md#iac-scanning-infrastructure-as-code).
 ## Saga options
 
 ```yaml
-controllers:
-  iac:
-    trivyConfig:
-      checks: [security/checks]   # your own Rego, alongside Trivy's built-in checks
-      namespaces: [user]          # the namespaces those checks declare
+config:
+  controls:
+    iac:
+      trivyConfig:
+        checks: [security/checks]   # your own Rego, alongside Trivy's built-in checks
+        namespaces: [user]          # the namespaces those checks declare
 ```
 
 | Option | What it does |
@@ -55,8 +56,6 @@ visible.
 
 ## Data
 
-The **vulnerability database**, from `mirror.gcr.io` and `ghcr.io`, which are Trivy's own
-defaults in that order. Warmed once per run, and `--skip-db-update` is passed when `--offline`
-is set.
-
-`config.controls.iac.trivy.dbRepository` replaces both with an internal mirror.
+The **checks bundle**, from `mirror.gcr.io/aquasec/trivy-checks`, Trivy's own default, warmed once
+per run. With `--offline`, Draugr passes `--skip-check-update` and Trivy evaluates the checks built
+into the pinned release. Misconfiguration scanning reads no vulnerability database.

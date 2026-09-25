@@ -168,6 +168,23 @@ A fragment fetched from another repository also carries `url`, `revision` and `r
 Azure Pipelines, CircleCI and Buildkite are recognized; outside them the block is absent rather than
 guessed at.
 
+It also names two people, as the CI system reports them: `runBy`, who started the pipeline, and
+`commitAuthor`, who wrote the commit being built. `triggeredBy` appears on GitHub when somebody else
+re-ran the job. Each carries what the platform offers, a `handle`, a display `name` and a stable `id`,
+and an `email` only when the descriptor sets [`config.ci.recordEmail`](../reference/saga-schema.md#ci-configci).
+
+| | `runBy` | `commitAuthor` |
+|---|---|---|
+| GitHub Actions | handle, id | handle and name, on a push |
+| GitLab CI | handle, name, id | name |
+| Azure Pipelines | name, id | name |
+| CircleCI | handle | |
+| Buildkite | name | name |
+
+A field the platform does not report is absent, and neither person is ever filled in from the other.
+Both are what the pipeline's own environment says, which the pipeline controls. They are a lead to
+follow, not proof of who acted.
+
 ```bash
 # Two runs, one question: did anything about the descriptor change between them?
 jq -r '.descriptor.digest' a/report.json b/report.json | uniq | wc -l
@@ -230,16 +247,16 @@ all. Absent is not the same as a default gate, which is why nothing is filled in
 
 ```yaml
 config:
-  reports:
-    - format: sarif        # for code scanning / dashboards
-    - format: markdown     # a portable report (MR comment, wiki)
-    - format: html         # a shareable, browser-viewable artifact
-    - format: template     # custom payload from a Go text/template
-      template: "{{.Verdict}}: P1={{.Priorities.P1}} P2={{.Priorities.P2}}\n"
-      filename: summary.txt   # optional; overrides the default output filename
   publishers:
     - kind: file           # write each report to a directory
       dir: ./out           # → ./out/results.sarif, ./out/report.md, ./out/report.html, ./out/summary.txt
+      reports:
+        - format: sarif        # for code scanning / dashboards
+        - format: markdown     # a portable report (MR comment, wiki)
+        - format: html         # a shareable, browser-viewable artifact
+        - format: template     # custom payload from a Go text/template
+          template: "{{.Verdict}}: P1={{.Priorities.P1}} P2={{.Priorities.P2}}\n"
+          filename: summary.txt   # optional; overrides the default output filename
 ```
 
 The **`template`** format renders a [Go `text/template`](https://pkg.go.dev/text/template) against a
@@ -292,11 +309,8 @@ That is the part a screenshot cannot show.
 
 ```yaml
 config:
-  reports:
-    - format: json      # the run
-    - format: sarif     # its evidence
   publishers:
-    - kind: draugr-api
+    - kind: draugr-api    # renders the run report and its evidence for itself
 ```
 
 ```bash
@@ -355,6 +369,16 @@ log saying `400 Bad Request` tells the reader nothing they can act on.
 {"error": "invalid_field", "detail": "verdict: required; post report.json, not results.sarif"}
 ```
 
+A server that reads only reports from a newer Draugr answers `422 draugr_too_old` and puts the
+oldest version it accepts in `minimum`. Draugr leads its error with that version and the command
+that installs it. A refusal with no `minimum` reaches the reader as `draugr_too_old` followed by
+your own `detail`.
+
+```json
+{"error": "draugr_too_old", "minimum": "0.122.0",
+ "detail": "this server reads runs from Draugr v0.122.0 or later, and this run came from Draugr v0.121.1. Upgrade Draugr and run the scan again"}
+```
+
 Two lines worth recognizing in a build log:
 
 - `evidence already held`. A re-run produced the same findings, so there was nothing to upload.
@@ -366,8 +390,6 @@ In a pipeline everything defaults from the environment, so the whole configurati
 
 ```yaml
 config:
-  reports:
-    - format: markdown
   publishers:
     - kind: azure-pr-comment
 ```
@@ -406,8 +428,6 @@ Everything defaults from the runner environment, so the whole configuration is:
 
 ```yaml
 config:
-  reports:
-    - format: markdown
   publishers:
     - kind: gitlab-mr-comment
 ```
@@ -470,13 +490,13 @@ pushing to code scanning is a **report format**, not a publisher, and it compose
 
 ```yaml
 config:
-  reports:
-    - format: gitlab-sast
-    - format: gitlab-secret-detection
-    - format: gitlab-codequality
   publishers:
     - kind: file
       dir: ./draugr-out
+      reports:
+        - format: gitlab-sast
+        - format: gitlab-secret-detection
+        - format: gitlab-codequality
 ```
 
 ```yaml
@@ -576,6 +596,23 @@ finding, offered as ordinary download links:
 
 The TSV covers **every** finding including suppressed ones, each marked with the reason it was set
 aside. The download is the record, and you can filter in the spreadsheet.
+
+**Each component gets its own verdict**, in a table beside the controls: what the descriptor
+declared it to be, whether its own findings pass the run's gate, how they ranked, and whether
+anything went unscanned. The controls table answers whether the project is shippable; this one
+answers which part of it is not, which is the answer somebody takes back to a team. A component the
+scope left out is listed as not scanned rather than omitted, and a component whose scans all failed
+reads `ERROR` rather than passing on findings that were never possible.
+
+Narrowing the findings to a single component adds a strip above the list carrying that component's
+verdict, its bands and the controls it did not pass. It appears for one component and not for two,
+because there is no verdict that describes two.
+
+**A finding whose message is too long for its row opens to the whole of it.** Such a row is marked
+`more`; click anywhere on it, or press Enter on it, and the scanner's full message replaces the
+shortened one. Links on the row, such as an advisory, keep working. It is a native
+disclosure that works without JavaScript. The report's search matches the whole message, and
+printing includes every message in full.
 
 **Search and filtering** are progressive enhancement. The page renders complete without
 JavaScript: the full table, both downloads, and every section. The script only reveals a search

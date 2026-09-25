@@ -17,6 +17,7 @@ import (
 	"github.com/draugr-dev/draugr/internal/git"
 	"github.com/draugr-dev/draugr/internal/netpolicy"
 	sbomgen "github.com/draugr-dev/draugr/internal/sbom"
+	"github.com/draugr-dev/draugr/internal/scanners"
 	"github.com/draugr-dev/draugr/internal/tools"
 	"github.com/draugr-dev/draugr/internal/version"
 	"github.com/draugr-dev/draugr/internal/vexload"
@@ -24,7 +25,6 @@ import (
 	"github.com/draugr-dev/draugr/pkg/ci"
 	"github.com/draugr-dev/draugr/pkg/config"
 	"github.com/draugr-dev/draugr/pkg/engine"
-	"github.com/draugr-dev/draugr/pkg/exploit"
 	"github.com/draugr-dev/draugr/pkg/norn"
 	"github.com/draugr-dev/draugr/pkg/plugin"
 	"github.com/draugr-dev/draugr/pkg/prioritization"
@@ -34,6 +34,7 @@ import (
 	"github.com/draugr-dev/draugr/pkg/sarif"
 	"github.com/draugr-dev/draugr/pkg/skald"
 
+	"github.com/draugr-dev/draugr/internal/english"
 	"github.com/draugr-dev/draugr/internal/scanpolicy"
 )
 
@@ -274,7 +275,11 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 			return err
 		}
 	}
-	expl, feedProv, err := loadExploitSource(ctx, exploitSettings(opts, model.Config.Exploitability))
+	settings := exploitSettings(opts, model.Config.Exploitability)
+	// The same limit governs every cached feed, including the Go vulnerability database
+	// govulncheck reads, which a scanner cannot see in the descriptor for itself.
+	scanners.SetFeedMaxAge(settings.maxAge)
+	expl, feedProv, err := loadExploitSource(ctx, settings)
 	if err != nil {
 		return err
 	}
@@ -289,12 +294,15 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		return err
 	}
 
+	// Empty until the scan has found packages to ask about; see dependencyHealth.
+	health, healthOpts := dependencyHealth(model.Config.DependencyHealth, os.Stderr)
+
 	eopts := []engine.Option{
-		engine.WithPrioritization(defaultPrioritizer(expl)),
+		engine.WithPrioritization(scanpolicy.PrioritizerWith(expl, health)),
 		// Beside the prioritizer, because they describe the same decision from two sides: what
 		// it did, and what it had to work from. A run that enriched without saying what it
 		// consulted produces evidence nobody can check the ranking against.
-		engine.WithConsulted(expl.Consulted()),
+		engine.WithConsulted(append(expl.Consulted(), health.Consulted()...)),
 		engine.WithSBOM(sbomgen.New()),
 		// So a cache entry names the commit it describes rather than a branch that has moved
 		// under it. One `ls-remote` per repository, against the server a clone would use anyway,
@@ -310,6 +318,7 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 			return git.RemoteURL(context.Background(), path)
 		}),
 	}
+	eopts = append(eopts, healthOpts...)
 	if netpolicy.Offline() {
 		eopts = append(eopts, engine.WithoutPrewarm())
 	}
@@ -414,6 +423,9 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 			return err
 		}
 	}
+	// Which build of each scanner ran, resolved once: the evidence block reports it and a tip is
+	// gated on it, and deriving it twice is two answers to one question.
+	builds := toolBuilds(ctx, run)
 	data := report.Data{
 		Project:     model.ProjectName(),
 		Release:     model.Release,
@@ -434,7 +446,7 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		View:      report.View(opts.view),
 		Uncovered: uncoveredFor(model),
 		Suggestions: scanSuggestions(tipContext{
-			model: model, run: run, verdict: verdict, opts: &opts,
+			model: model, run: run, verdict: verdict, opts: &opts, tools: builds,
 		}),
 		// With nothing declared, every component is read as public and critical, so the bands rank
 		// severity alone. The report says so beside the counts rather than leaving a reader to
@@ -444,14 +456,14 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 		Scope:                reportScope(scope),
 		UnattributedFindings: unattributed,
 		Exploitability:       feedProv,
-		Tools:                toolBuilds(ctx, run),
+		Tools:                builds,
 		Repositories:         report.RepositoriesFrom(run),
 		VEX:                  model.Config.VEX,
 		// What produced this run, as opposed to what it found. Both are known only here and are
 		// gone when the process exits: a platform reading the report can see which controls ran
 		// and not what enabled them, and can see a repository and not which pipeline scanned it.
 		Descriptor: skald.DescriptorFrom(resolved),
-		CI:         detectedCI(),
+		CI:         detectedCI(model.Config.CI),
 		// Stamped so a rendered report can say when it ran and what produced it. A report
 		// offered as evidence has to answer both, and only the CLI knows either.
 		Generated: time.Now(),
@@ -481,7 +493,7 @@ func runScan(ctx context.Context, target string, opts scanOptions, reg *engine.R
 			return err
 		}
 	}
-	// Deliver configured reports to configured publishers (Saga config.reports/publishers).
+	// Deliver each publisher's reports (Saga config.publishers).
 	// --no-publish suppresses this so a caller (e.g. the diff workflow, which scans both sides
 	// of a PR) can produce artifacts without triggering side effects like a code-scanning upload.
 	//
@@ -570,14 +582,6 @@ func fixFirstLimit(top int) int {
 		return -1
 	}
 	return top
-}
-
-// defaultPrioritizer builds the engine prioritizer from the shipped matrices and the
-// per-control severity floors: resolve each finding's normalized severity, enrich it with
-// exploitability (KEV/EPSS) when a source is loaded, then rank it by the component's exposure
-// and criticality.
-func defaultPrioritizer(expl *exploit.Source) engine.Prioritizer {
-	return scanpolicy.DefaultPrioritizer(expl)
 }
 
 // validatePriority validates and upper-cases a priority-band flag value. Empty is allowed
@@ -683,7 +687,7 @@ func firstNonEmpty(vals ...string) string {
 // writeArtifacts renders the requested formats into dir.
 //
 // The formats are rendered through the same reporters that serve --format and the Saga's
-// config.reports, so an HTML file written here and one delivered by a publisher cannot differ.
+// publishers, so an HTML file written here and one delivered by a publisher cannot differ.
 func writeArtifacts(dir string, formats []string, data report.Data, release saga.Release,
 	run engine.Result, verdict norn.Result, minPriority, declared string,
 ) error {
@@ -710,9 +714,10 @@ func writeArtifacts(dir string, formats []string, data report.Data, release saga
 			if err := writeTo(filepath.Join(dir, name), func(w io.Writer) error {
 				// Named, because a document with no project in it is one a platform files under nothing. And
 				// there is no release name left for it to be recovered from.
+				prov := data.JSONProvenance()
+				prov.Gate, prov.Build = data.GateForReport(), buildRef()
 				return skald.RenderJSONFor(w, data.ProjectName(), release, run, verdict,
-					firstNonEmpty(declared, minPriority), nil, sarif.MarshalOptions{},
-					skald.Provenance{Gate: data.GateForReport(), Build: buildRef()})
+					firstNonEmpty(declared, minPriority), data.JSONFeeds(), sarif.MarshalOptions{}, prov)
 			}); err != nil {
 				return err
 			}
@@ -842,7 +847,11 @@ func componentVerdicts(
 	sort.Strings(names)
 	for _, name := range names {
 		res := policy.Evaluate(byComponent[name])
-		cv := report.ComponentVerdict{Name: name, Verdict: res.Verdict}
+		cv := report.ComponentVerdict{
+			Name: name, Verdict: res.Verdict,
+			Exposure:    string(byName[name].Exposure),
+			Criticality: string(byName[name].Criticality),
+		}
 		for _, c := range res.Controls {
 			if c.Verdict == norn.Fail {
 				cv.Controls = append(cv.Controls, c.Control)
@@ -1090,7 +1099,7 @@ func checkWorkingTree(enabled bool, model *saga.Model) error {
 	if len(remote) > 0 {
 		return fmt.Errorf("--working-tree needs a local checkout, and %s %s a remote: "+
 			"scan without the flag, or point the descriptor at a path",
-			strings.Join(remote, ", "), plural2(len(remote), "is", "are"))
+			strings.Join(remote, ", "), english.Choose(len(remote), "is", "are"))
 	}
 	return nil
 }
@@ -1138,8 +1147,14 @@ func declaredTargets(c saga.Component) map[string]int {
 //
 // A pointer so that "not in CI" is absent from a report rather than an empty object, which a
 // consumer would have to distinguish from a platform that was recognized and told us nothing.
-func detectedCI() *ci.Context {
-	if c := ci.Detect(); c.Detected() {
+//
+// Email addresses are read only when the descriptor asked for them.
+func detectedCI(cfg *saga.CIConfig) *ci.Context {
+	c := ci.Detect()
+	if cfg != nil && cfg.RecordEmail {
+		c = ci.DetectWithEmail()
+	}
+	if c.Detected() {
 		return &c
 	}
 	return nil

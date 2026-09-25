@@ -541,30 +541,65 @@ type Suppression struct {
 }
 
 // Where a suppression's decision came from, for Suppression.Origin.
+//
+// Draugr stamps the two it makes itself, and reads the third off their absence: a suppression in a
+// scanner's report that Draugr did not put there is one the scanner honored out of the file it
+// scanned. Nothing here parses a comment or opens a supplier's document, so the value says which
+// party made the claim and never that the claim is true.
 const (
-	// OriginSaga is a rule in this project's own descriptor. The default reading of an empty
-	// Origin, so a report written before imported claims existed still means what it said.
+	// OriginSaga is a rule in this project's own descriptor.
+	//
+	// Written onto every suppression the exclusion rules make. An empty Origin beside a name is
+	// read as this too, so a report written before origins were recorded still means what it said.
 	OriginSaga = "saga"
 	// OriginVEX is a statement imported from a document somebody else wrote.
 	OriginVEX = "vex"
-	// OriginTool is a suppression the author wrote into the source and the scanner honored, a Semgrep
-	// `nosem`, a `# noqa`, a linter's inline pragma.
+	// OriginTool is a suppression the scanner already carried, honoring a directive in the file it
+	// scanned: a Semgrep `nosem`, a `# noqa`, a linter's inline pragma.
 	//
-	// The weakest of the three, and kept apart for that reason. A descriptor rule was reviewed by
+	// Read off the absence of Draugr's own record rather than detected, because the alternative is
+	// a parser per scanner per comment syntax, all of them guessing at what the tool meant. Which
+	// of the two a scanner's suppression is comes from SARIF's own `kind`, a required field, so
+	// nothing here infers it either.
+	//
+	// The weakest of the four, and kept apart for that reason. A descriptor rule was reviewed by
 	// whoever owns the descriptor and a supplier's claim is answerable by the supplier; this one
 	// was written by whoever was editing the file, possibly to get a build green, and nothing
 	// about it went past a second person. Counting it with the others would let the weakest form
 	// of acceptance hide inside the strongest.
 	OriginTool = "tool"
+	// OriginScanner is a suppression the scanner applied out of its own configuration: a
+	// `.trivyignore` line, a `.gitleaksignore` entry, a rule in `.grype.yaml`.
+	//
+	// Apart from OriginTool because the two answer "who do I ask" differently. A directive beside
+	// the line is the work of whoever was editing that line. A file of exclusions is a file in the
+	// repository, changed by a commit somebody can read, which puts it nearer the descriptor than
+	// the comment. It is still outside the descriptor, still carries no required reason, and is
+	// still not what the register was built to show.
+	//
+	// SARIF calls this kind `external`, which is also what Draugr writes for its own; ours are told
+	// apart by the record they carry, never by the kind.
+	OriginScanner = "scanner"
 )
 
 // Suppressed reports whether this finding was excluded, by a Saga rule or by an imported claim.
 func (r Result) Suppressed() bool { return r.Suppression != nil }
 
-// SilencedInSource reports whether a suppression came from a comment in the code rather than from
-// a decision anybody recorded.
+// SilencedInSource reports whether a suppression came from a directive in the code rather than
+// from a decision anybody recorded.
 func (r Result) SilencedInSource() bool {
 	return r.Suppression != nil && r.Suppression.Origin == OriginTool
+}
+
+// SetAsideByScanner reports whether the scanner set this aside rather than anybody here.
+//
+// Both of the scanner's own origins, because the question these counts and registers ask is whose
+// decision it was, and the answer for a `.trivyignore` line is the same as for a `#nosec`: not
+// this descriptor, and nobody's signature. Asking only about the narrower one filed a scanner's
+// exclusion in the register of decisions somebody here signed.
+func (r Result) SetAsideByScanner() bool {
+	return r.Suppression != nil &&
+		(r.Suppression.Origin == OriginTool || r.Suppression.Origin == OriginScanner)
 }
 
 // Imported reports whether the decision to suppress came from outside this project.
@@ -635,6 +670,31 @@ type Report struct {
 	// consulted" without this. And silence reads as the second, which makes the whole ranking look
 	// like it came from nowhere.
 	Consulted []Consulted `json:"consulted,omitempty"`
+	// Inputs are the dependency files a scan accounted for: those it read packages from, and those
+	// in its tree it did not, each with the reason.
+	//
+	// The argument Decided makes, applied to files. A dependency scan that reports nothing has
+	// either read every manifest and found them clean or read none of them, and without this the
+	// two produce the same empty report and the same PASS. Empty for a scanner that does not
+	// account for its reads, which says nothing either way.
+	Inputs []Input `json:"inputs,omitempty"`
+}
+
+// Input is one dependency file as a scan accounted for it.
+type Input struct {
+	// Scanner is the scanner that read it, or did not.
+	Scanner string `json:"scanner"`
+	// Repository and Component say whose file it is. Stamped after the scan, like a finding's, so a
+	// cached result shared by two components carries each one's name.
+	Repository string `json:"repository,omitempty"`
+	Component  string `json:"component,omitempty"`
+	// Path is relative to the repository root.
+	Path string `json:"path"`
+	// Packages is how many packages the scanner read from the file.
+	Packages int `json:"packages,omitempty"`
+	// Unread is why the file contributed no packages, and empty when it was read: "no lockfile",
+	// "no pinned versions" or "no packages read".
+	Unread string `json:"unread,omitempty"`
 }
 
 // Consulted is one exploitability dataset a run had available.
@@ -933,6 +993,7 @@ func Merge(reports ...Report) Report {
 		out.addProvenance(rep.Provenance)
 		out.addDecided(rep.Decided)
 		out.addConsulted(rep.Consulted)
+		out.addInputs(rep.Inputs)
 		for _, res := range rep.Results {
 			if res.Tool == "" {
 				res.Tool = rep.Tool
@@ -1003,6 +1064,22 @@ func (r *Report) addConsulted(feeds []Consulted) {
 			continue
 		}
 		r.Consulted = append(r.Consulted, f)
+	}
+}
+
+// addInputs appends inputs that are not already present.
+//
+// Keyed on everything but the count: the same file read by one scanner for one component is one
+// statement, and merging a report with itself must not double it.
+func (r *Report) addInputs(inputs []Input) {
+	for _, in := range inputs {
+		if slices.ContainsFunc(r.Inputs, func(existing Input) bool {
+			return existing.Scanner == in.Scanner && existing.Repository == in.Repository &&
+				existing.Component == in.Component && existing.Path == in.Path
+		}) {
+			continue
+		}
+		r.Inputs = append(r.Inputs, in)
 	}
 }
 
@@ -1186,6 +1263,16 @@ func RepositoriesIn(reports []Report) []RepositoryRef {
 			out = append(out, r)
 		}
 	}
+	// Sorted, because the order they were encountered in is the order the jobs finished in. Two
+	// scans of one descriptor printed their repositories in different orders, which makes the same
+	// run look like a different one to anything comparing two reports as text, and makes a reader
+	// checking a report against yesterday's read a difference that is not there.
+	slices.SortFunc(out, func(a, b RepositoryRef) int {
+		if a.URL != b.URL {
+			return strings.Compare(a.URL, b.URL)
+		}
+		return strings.Compare(a.Revision, b.Revision)
+	})
 	return out
 }
 

@@ -22,7 +22,9 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/draugr-dev/draugr/internal/english"
 	"github.com/draugr-dev/draugr/pkg/cache"
+	"github.com/draugr-dev/draugr/pkg/dephealth"
 	"github.com/draugr-dev/draugr/pkg/plugin"
 	"github.com/draugr-dev/draugr/pkg/saga"
 	"github.com/draugr-dev/draugr/pkg/sarif"
@@ -53,6 +55,11 @@ type Engine struct {
 	// resolveRemote names a local checkout by its remote. See WithRemoteResolver.
 	resolveRemote RemoteResolver
 	prioritize    Prioritizer
+	// resolveHealth fills `health` with what is known about the packages this run found, and
+	// health is handed to the prioritizer before any of them are known. Nil unless a descriptor
+	// asked for the signal.
+	resolveHealth DependencyHealthResolver
+	health        *dephealth.Source
 	// skipPrewarm suppresses the pre-run warm-up of shared scanner state (Trivy's database,
 	// Nuclei's templates), which is the only part of a scan that reaches the network on its own.
 	skipPrewarm bool
@@ -448,19 +455,11 @@ func consentFor(info plugin.ScannerInfo, allowed map[plugin.EffectKind]bool) err
 	return fmt.Errorf(
 		"this scanner has %s that %s not been accepted: %s. Add %s to config.allowEffects in "+
 			"your Saga, or pass --allow-effects %s",
-		plural2(len(kinds), "an effect", "effects"),
-		plural2(len(kinds), "has", "have"),
+		english.Choose(len(kinds), "an effect", "effects"),
+		english.Choose(len(kinds), "has", "have"),
 		strings.Join(described, "; "),
-		plural2(len(kinds), "it", "them"),
+		english.Choose(len(kinds), "it", "them"),
 		strings.Join(kinds, ","))
-}
-
-// plural2 picks a word for a count.
-func plural2(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
 }
 
 // dedupeEffects collapses the same effect reported by several jobs, in a stable order.
@@ -520,14 +519,18 @@ type Result struct {
 	// exclusion doing nothing is indistinguishable from one that is working: it is usually a
 	// typo, a rule id that moved, or a finding someone already fixed and forgot to stop excusing.
 	UnmatchedExclusions []saga.ExcludeRule
-	// Silenced counts findings a scanner reported as suppressed because somebody wrote a comment in
-	// the source, a Semgrep `nosem`, a linter pragma.
+	// Silenced counts findings the scanner set aside on its own: a directive in the source such as
+	// a Semgrep `nosem`, or a rule in the scanner's own configuration such as a `.trivyignore`
+	// line.
 	//
 	// Counted apart from Suppressed and Imported because it is the weakest of the three and the
 	// only one nobody reviewed. A descriptor rule was written where whoever owns the descriptor
-	// can see it; a supplier's claim is answerable by the supplier. This one was written by
-	// whoever was editing the file, possibly to get a build green, and folding it into either
-	// total would let that hide inside a stronger answer.
+	// can see it; a supplier's claim is answerable by the supplier. This one was written wherever
+	// it was convenient, possibly to get a build green, and folding it into either total would let
+	// that hide inside a stronger answer.
+	//
+	// One count for both of the scanner's own, because what the number is for is true of each. The
+	// finding itself carries which of the two it was.
 	Silenced int
 	// Imported counts findings excused by a claim somebody else made, a supplier's VEX document
 	// rather than a rule in this descriptor. Counted apart from Suppressed because they answer the
@@ -550,6 +553,10 @@ type Result struct {
 	// the question the target asked. Reported because a scanner that quietly does not run is
 	// indistinguishable, in the output, from one that ran and found nothing.
 	Skipped []SkippedJob
+	// Inputs is what the dependency scans read, per component and control, with the dependency
+	// files in the tree that none of them read. Reported because a scan that could not read a
+	// manifest finds nothing in it, and that reads as a clean result.
+	Inputs []InputCoverage
 	// Scanners names every scanner this run used, deduplicated and sorted.
 	//
 	// Recorded because a report has to be able to say which tools produced its findings. The SARIF
@@ -1173,6 +1180,7 @@ func (e *Engine) Run(ctx context.Context, model saga.Model) (Result, error) {
 		SBOMs:     docs,
 	}
 	res.Skipped = skipped
+	res.Inputs = inputCoverage(byCtl)
 	if len(ctlErrs) > 0 {
 		res.ScanErrors = ctlErrs
 	}
@@ -1190,6 +1198,11 @@ func (e *Engine) Run(ctx context.Context, model saga.Model) (Result, error) {
 		}
 		res.Controls[control] = cr
 	}
+
+	// Dependency health before reachability, so the ranking a reachability verdict is compared
+	// against already includes anything the dependency itself said. Both are enrichment that can
+	// only run once the scanners have produced something to enrich.
+	e.applyDependencyHealth(ctx, res.Controls, model)
 
 	// Reachability first, so a suppression decision is made against a fully enriched finding and
 	// an excused finding still carries the evidence about whether anything could reach it.
@@ -1315,6 +1328,16 @@ func appendJobs(dst []PlannedJob, control string, comp *saga.Component, jobs []p
 // can share a repository while disagreeing about who publishes it. The cached findings must never
 // be mutated, so the slice is copied.
 func (e *Engine) stampJobFields(report sarif.Report, pj PlannedJob) sarif.Report {
+	// Copied before stamping: a cached or deduplicated report is shared by every component that
+	// scans the same repository, and each has to carry its own name.
+	if len(report.Inputs) > 0 {
+		inputs := make([]sarif.Input, len(report.Inputs))
+		copy(inputs, report.Inputs)
+		for i := range inputs {
+			inputs[i].Component = pj.Component
+		}
+		report.Inputs = inputs
+	}
 	if len(report.Results) == 0 {
 		return report
 	}
@@ -1433,8 +1456,13 @@ func applyExclusions(controls map[string]plugin.ControlResult, rules []saga.Excl
 			for ri, rule := range rules {
 				if rule.Matches(res.Location.URI, res.RuleID) {
 					matched[ri] = true
+					// Said rather than left to be inferred. A reader of the report asks who decided
+					// this was acceptable, and the answer is different for each of the three
+					// origins; with none recorded, a rule that named nobody was indistinguishable
+					// from a comment somebody wrote in the file, which is the weakest of the three
+					// and the one nobody reviewed.
 					res.Suppression = &sarif.Suppression{
-						Kind: "external", Justification: rule.Reason,
+						Kind: "external", Justification: rule.Reason, Origin: sarif.OriginSaga,
 						AcceptedBy: rule.AcceptedBy, Expires: rule.Expires,
 						Source: rule.Source,
 					}
@@ -1471,8 +1499,10 @@ const sbomPseudoControl = "(sbom)"
 // generateSBOMs takes one inventory per distinct repository and image in the model.
 //
 // Deduplicated by target identity: several controls scan the same repository, and an SBOM of it
-// is the same document however many controls touched it. Ordered by component then target so a
-// run is reproducible and two runs diff cleanly.
+// is the same document however many controls touched it. A repository's identity carries its
+// scope, so two components on different paths of one repository each get an inventory of their
+// own part, the part their controls scanned. Ordered by component then target so a run is
+// reproducible and two runs diff cleanly.
 func (e *Engine) generateSBOMs(ctx context.Context, model saga.Model) ([]sbom.Document, []string) {
 	cfg := model.Config.SBOM
 	if cfg == nil || !cfg.Enabled {
@@ -1495,6 +1525,7 @@ func (e *Engine) generateSBOMs(ctx context.Context, model saga.Model) ([]sbom.Do
 		for _, r := range comp.Repositories {
 			targets = append(targets, plugin.RepositoryTarget{
 				URL: r.URL, Revision: r.Revision, WorkingTree: e.workingTree,
+				Paths: r.Paths, Ignore: r.Ignore,
 			})
 		}
 		for _, img := range comp.Images {
@@ -1789,11 +1820,15 @@ func claimReason(c vex.Claim) string {
 // disappear.
 func (e *Engine) applyReachability(controls map[string]plugin.ControlResult, model saga.Model) ReachabilitySummary {
 	// Index the analyzers' verdicts by what identifies a dependency finding everywhere else:
-	// the repository it was found in, the package it is about, and the vulnerability id.
+	// the component and repository it was found in, the manifest that declared it, the package it
+	// is about, and the vulnerability id.
 	//
-	// The repository is part of the key deliberately. A component may hold several, and the same
-	// module can be called in one and merely required in another; a key without it would pick
-	// whichever was indexed last and report that verdict for both.
+	// The component, the repository and the manifest are part of the key deliberately. A
+	// component may hold several repositories, a repository several Go modules, and two
+	// components may share one repository while each scans only its own paths. The same
+	// dependency can be called in one of these and merely required in another, and a key without
+	// all three would give every finding one verdict and a call path through code its own
+	// component may not contain.
 	verdicts := map[reachKey]*sarif.Reachability{}
 	analyzers := map[string]*AnalyzerReachability{}
 	for _, cr := range controls {
@@ -1805,7 +1840,7 @@ func (e *Engine) applyReachability(controls map[string]plugin.ControlResult, mod
 			if _, ok := analyzers[res.Reachability.Analyzer]; !ok {
 				analyzers[res.Reachability.Analyzer] = &AnalyzerReachability{Analyzer: res.Reachability.Analyzer}
 			}
-			key := reachKey{res.Repository, res.Package.Name, res.RuleID}
+			key := reachKey{res.Component, res.Repository, res.Location.URI, res.Package.Name, res.RuleID}
 			verdicts[key] = strongerReachability(verdicts[key], res.Reachability)
 		}
 	}
@@ -1826,12 +1861,24 @@ func (e *Engine) applyReachability(controls map[string]plugin.ControlResult, mod
 		return ReachabilitySummary{}
 	}
 
+	// Which verdicts another scanner's finding will carry, decided before anything is dropped. An
+	// analyzer's copy and the finding it duplicates can arrive in either order, within one control's
+	// results or across two controls, and deciding as the loop goes would keep the analyzer's copy
+	// whenever it came first.
 	folded := map[reachKey]bool{}
+	for _, cr := range controls {
+		for _, res := range cr.Report.Results {
+			key := reachKey{res.Component, res.Repository, res.Location.URI, packageName(res), res.RuleID}
+			if _, ok := verdicts[key]; ok && res.Reachability == nil {
+				folded[key] = true
+			}
+		}
+	}
 	for name, cr := range controls {
 		kept := cr.Report.Results[:0]
 		for i := range cr.Report.Results {
 			res := cr.Report.Results[i]
-			key := reachKey{res.Repository, packageName(res), res.RuleID}
+			key := reachKey{res.Component, res.Repository, res.Location.URI, packageName(res), res.RuleID}
 			switch {
 			case res.Reachability != nil:
 				// An analyzer's own finding. Keep it only where nothing else reported the same
@@ -1845,13 +1892,12 @@ func (e *Engine) applyReachability(controls map[string]plugin.ControlResult, mod
 				if !ok {
 					break
 				}
-				folded[key] = true
 				// Copied per finding: one analyzer verdict covers every identifier the advisory
 				// is known by, but RankedAs is a fact about this finding's own severity, and a
 				// shared struct would record whichever was banded last for all of them.
 				verdictCopy := *verdict
 				res.Reachability = &verdictCopy
-				e.rebandForReachability(&res, name, model)
+				e.reband(&res, name, model)
 			}
 			kept = append(kept, res)
 		}
@@ -1918,11 +1964,16 @@ func reachabilityRank(s sarif.ReachabilityState) int {
 	}
 }
 
-// reachKey identifies one vulnerability in one package in one repository.
+// reachKey identifies one vulnerability in one package, as one component's scan of one
+// repository reported it.
 type reachKey struct {
+	// component is the component whose job produced the finding, empty for a project-scoped one.
+	component  string
 	repository string
-	pkg        string
-	rule       string
+	// manifest is the file the dependency was declared in: a Go module's go.mod.
+	manifest string
+	pkg      string
+	rule     string
 }
 
 // packageName is the package a finding is about, or "" for a finding that is not about one.
@@ -1933,12 +1984,15 @@ func packageName(res sarif.Result) string {
 	return res.Package.Name
 }
 
-// rebandForReachability recomputes a finding's priority now that reachability is attached.
+// reband recomputes a finding's priority after an enrichment has attached something new to it.
+//
+// Named for what it does rather than for who calls it: reachability and dependency health both
+// arrive after ranking and both need the band worked out again from the same inputs.
 //
 // The band is derived from the component's declared exposure and criticality, which the
 // prioritizer needs and a finding does not carry, so they are read back from the descriptor by
 // the component the finding was stamped with.
-func (e *Engine) rebandForReachability(res *sarif.Result, control string, model saga.Model) {
+func (e *Engine) reband(res *sarif.Result, control string, model saga.Model) {
 	if e.prioritize == nil {
 		return
 	}
@@ -1975,7 +2029,7 @@ func countSilenced(controls map[string]plugin.ControlResult) int {
 	n := 0
 	for _, cr := range controls {
 		for _, res := range cr.Report.Results {
-			if res.SilencedInSource() {
+			if res.SetAsideByScanner() {
 				n++
 			}
 		}
@@ -2176,4 +2230,61 @@ func (e *Engine) commitOf(ctx context.Context, t plugin.Target) (string, bool) {
 	// Stored either way, including the failure, so one unreachable remote is asked about once.
 	e.revisions[id] = commit
 	return commit, commit != ""
+}
+
+// DependencyHealthResolver answers what is known about the packages a run found.
+//
+// A function rather than a client, so pkg/engine holds no opinion about where the answer comes
+// from and no HTTP. The caller supplies one that reaches a service, or one that reads a fixture.
+type DependencyHealthResolver func(ctx context.Context, purls []string) error
+
+// WithDependencyHealth supplies the resolver and the source it fills.
+//
+// Both, because the source is handed to the prioritizer before a scan and filled after one: the
+// packages are not known until the scanners have run. The engine calls the resolver once, between
+// aggregation and ranking, and rebands what it changed.
+func WithDependencyHealth(resolve DependencyHealthResolver, src *dephealth.Source) Option {
+	return func(e *Engine) { e.resolveHealth, e.health = resolve, src }
+}
+
+// applyDependencyHealth asks about every package this run found, then reranks the findings the
+// answer moves.
+//
+// A resolver that fails is reported by whoever supplied it and does not stop the run. This signal
+// never gates, so a lookup that did not happen costs a reader a line of evidence rather than a
+// verdict, which is the same trade the Nuclei template cache makes.
+func (e *Engine) applyDependencyHealth(ctx context.Context, controls map[string]plugin.ControlResult, model saga.Model) {
+	if e.resolveHealth == nil || e.health == nil {
+		return
+	}
+	seen := map[string]bool{}
+	var purls []string
+	for _, cr := range controls {
+		for _, res := range cr.Report.Results {
+			if res.Package == nil || res.Package.PURL == "" || seen[res.Package.PURL] {
+				continue
+			}
+			seen[res.Package.PURL] = true
+			purls = append(purls, res.Package.PURL)
+		}
+	}
+	if len(purls) == 0 {
+		return
+	}
+	sort.Strings(purls) // so two runs over one tree ask the same question in the same order
+	if err := e.resolveHealth(ctx, purls); err != nil {
+		return // reported by the caller; the run continues unenriched
+	}
+	if e.health.Empty() {
+		return
+	}
+	for name, cr := range controls {
+		for i := range cr.Report.Results {
+			if cr.Report.Results[i].Package == nil || cr.Report.Results[i].Package.PURL == "" {
+				continue
+			}
+			e.reband(&cr.Report.Results[i], name, model)
+		}
+		controls[name] = cr
+	}
 }

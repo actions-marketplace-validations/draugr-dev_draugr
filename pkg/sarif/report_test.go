@@ -459,3 +459,50 @@ func TestAgreementNoteSilentWhenOnlyOneScannerFoundIt(t *testing.T) {
 		t.Errorf("note = %q, want nothing", got)
 	}
 }
+
+// Two scans of one descriptor list their repositories in the same order.
+//
+// The order they arrive in is the order the scanner jobs finished in, and those run concurrently.
+// A report that reorders between runs makes the same run look like a different one to anything
+// comparing two as text, and makes a reader checking today's against yesterday's read a difference
+// that is not there. Two repositories, because one cannot show an ordering.
+func TestRepositoriesAreListedInAStableOrder(t *testing.T) {
+	ref := func(url, rev string) Report {
+		return Report{Provenance: []Provenance{{Tool: "trivy", Fields: []Field{
+			{Key: "repository", Value: url}, {Key: "revision", Value: rev},
+		}}}}
+	}
+	a, b := ref("./svc-a", "8709f892"), ref("./svc-b", "8709f892")
+
+	forward := RepositoriesIn([]Report{a, b})
+	backward := RepositoriesIn([]Report{b, a})
+	if len(forward) != 2 || len(backward) != 2 {
+		t.Fatalf("got %d and %d repositories, want two each", len(forward), len(backward))
+	}
+	for i := range forward {
+		if forward[i] != backward[i] {
+			t.Errorf("row %d: %+v from one order, %+v from the other", i, forward[i], backward[i])
+		}
+	}
+	if forward[0].URL != "./svc-a" {
+		t.Errorf("first row is %q, want the order to be the repositories' own", forward[0].URL)
+	}
+	// One repository at two revisions is two rows, and they are ordered too.
+	two := RepositoriesIn([]Report{ref("./svc", "bbbb"), ref("./svc", "aaaa")})
+	if len(two) != 2 || two[0].Revision != "aaaa" {
+		t.Errorf("got %+v", two)
+	}
+}
+
+// Merging a report with itself must not double what it read, and the same file read for two
+// components is two statements.
+func TestMergeDeduplicatesInputs(t *testing.T) {
+	a := Report{Inputs: []Input{
+		{Scanner: "trivy-fs", Repository: "r", Component: "api", Path: "go.mod", Packages: 3},
+		{Scanner: "trivy-fs", Repository: "r", Component: "worker", Path: "go.mod", Packages: 3},
+	}}
+	got := Merge(a, a).Inputs
+	if len(got) != 2 {
+		t.Errorf("inputs = %+v, want the two components' statements once each", got)
+	}
+}
